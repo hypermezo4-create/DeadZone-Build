@@ -32,6 +32,9 @@ jobs:
       TELEGRAM_CHANNEL_ID: ${{ secrets.MEZO_PRIVATE_CHAT_ID }}
       MEZO_PRIVATE_CHAT_ID: ${{ secrets.MEZO_PRIVATE_CHAT_ID }}
       TELEGRAM_RELEASE_GROUP_ID: ${{ secrets.TELEGRAM_RELEASE_GROUP_ID }}
+      DEADZONE_EMOJI_PACK_NAME: ${{ secrets.DEADZONE_EMOJI_PACK_NAME }}
+      DEADZONE_PREMIUM_EMOJI_SETS: ${{ secrets.DEADZONE_PREMIUM_EMOJI_SETS }}
+      DEADZONE_CUSTOM_EMOJI_IDS_FILE: "config/deadzone-custom-emoji-ids.json"
       MEZO_CONTACT_LINK: ${{ secrets.MEZO_CONTACT_LINK }}
       UPDATES_GROUP_LINK: ${{ secrets.UPDATES_GROUP_LINK }}
       SCREENSHOTS_GROUP_LINK: ${{ secrets.SCREENSHOTS_GROUP_LINK }}
@@ -43,7 +46,8 @@ jobs:
       RCLONE_UPLOAD_DIR: ${{ secrets.RCLONE_UPLOAD_DIR }}
       REQUEST_SOURCE: ${{ inputs.request_source }}
       PUBLISH_RELEASE: ${{ inputs.publish_release }}
-      DEADZONE_NOTIFY_TIMEOUT_SECONDS: "8"
+      DEADZONE_NOTIFY_CONNECT_TIMEOUT: "3.5"
+      DEADZONE_NOTIFY_READ_TIMEOUT: "6"
 
     steps:
       - name: Maximize build space
@@ -76,7 +80,7 @@ jobs:
           DEADZONE_PREMIUM_EMOJI: "0"
         run: timeout 8s python3 notify.py "start" "DeadZone_Lite" "${{ inputs.rom_link }}" "mezo-lite" || true
 
-      - name: Upgrade request notification to Premium
+      - name: Upgrade request notification to DeadZone Motion
         continue-on-error: true
         working-directory: toolbuild
         run: timeout 20s python3 notify.py "start" "DeadZone_Lite" "${{ inputs.rom_link }}" "mezo-lite" || true
@@ -104,7 +108,7 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends zipalign || true
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends aapt || true
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends rclone || curl -fsSL https://rclone.org/install.sh | sudo bash
-          python3 -m pip install --user ConfigObj setuptools "gdown==5.2.0"
+          python3 -m pip install --user ConfigObj setuptools
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Grant required file permissions
@@ -129,15 +133,6 @@ jobs:
           set -o pipefail
           echo "CURRENT_STAGE=parse_rom_metadata" >> "$GITHUB_ENV"
           sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash build.sh "$INPUT_URL" 2>&1 | tee build_action.log
-
-      - name: Upload build diagnostics
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: deadzone-lite-build-diagnostics
-          path: toolbuild/build_action.log
-          if-no-files-found: warn
-          retention-days: 7
 
       - name: Send packaging notification
         continue-on-error: true
@@ -179,37 +174,19 @@ jobs:
         working-directory: toolbuild
         run: timeout 8s python3 notify.py "success" "DeadZone_Lite" "${{ inputs.rom_link }}" "mezo-lite" || true
 
-      - name: Publish release
-        id: release_post
+      - name: Publish release notification
         if: success() && (startsWith(inputs.request_source, 'telegram') || inputs.publish_release == 'true')
         continue-on-error: true
         working-directory: toolbuild
         env:
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_RELEASE_GROUP_ID }}
-        run: |
-          echo "CURRENT_STAGE=release_notification" >> "$GITHUB_ENV"
-          set +e
-          notify_output="$(timeout 12s python3 notify.py "success" "DeadZone_Lite" "${{ inputs.rom_link }}" "mezo-lite" 2>&1)"
-          notify_exit=$?
-          set -e
-          printf '%s\n' "$notify_output"
-          if [[ $notify_exit -ne 0 ]] || grep -Eq '\[notify\] (Telegram secrets are missing|send failed:)' <<< "$notify_output"; then
-            exit 1
-          fi
+        run: timeout 12s python3 notify.py "success" "DeadZone_Lite" "${{ inputs.rom_link }}" "mezo-lite" || true
 
       - name: Request manual publish decision
         if: success() && !startsWith(inputs.request_source, 'telegram') && inputs.publish_release != 'true'
         continue-on-error: true
         working-directory: toolbuild
         run: timeout 8s python3 notify.py "success" "DeadZone_Lite" "${{ inputs.rom_link }}" "mezo-lite" || true
-
-      - name: Send release notification failure
-        if: steps.release_post.outcome == 'failure'
-        continue-on-error: true
-        working-directory: toolbuild
-        env:
-          NOTIFY_ERROR_REASON: "Release notification failed; the ROM build and upload completed successfully."
-        run: timeout 8s python3 notify.py "fail" "DeadZone_Lite" "${{ inputs.rom_link }}" "mezo-lite" || true
 
       - name: Send failure notification
         if: failure()
