@@ -120,6 +120,34 @@ jobs:
           test -x bin/Linux/x86_64/payload-extract
           bin/Linux/x86_64/payload-extract --help >/dev/null 2>&1 || true
 
+      - name: Support custom ROM filenames
+        working-directory: toolbuild
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("bin/ddevice/getROM.sh")
+          text = path.read_text(encoding="utf-8")
+          old = '''else
+              device_code="YourDevice"
+              base_rom_code="Unknown"
+              region_source="$device_code"
+          fi'''
+          new = '''else
+              rom_stem="${rom_filename%.*}"
+              device_code="${rom_stem%%-*}"
+              base_rom_code=$(printf '%s\n' "$rom_stem" | grep -oE '(OS[123](\.[[:alnum:]]+)+|V1[34](\.[[:alnum:]]+)+)' | head -n 1 || true)
+              region_source="$device_code"
+              if [[ -z "$base_rom_code" ]]; then
+                  base_rom_code="Unknown"
+              fi
+          fi'''
+          if old not in text:
+              raise SystemExit("Expected ROM metadata block was not found")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+          bash -n bin/ddevice/getROM.sh
+
       - name: Build ROM
         working-directory: toolbuild
         env:
