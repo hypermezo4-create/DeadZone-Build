@@ -124,6 +124,14 @@ jobs:
           test -x bin/Linux/x86_64/payload-extract
           bin/Linux/x86_64/payload-extract --help >/dev/null 2>&1 || true
 
+      - name: Prefer system Android sparse tools
+        working-directory: toolbuild
+        run: |
+          set -euo pipefail
+          test -x /usr/bin/simg2img
+          ln -sf /usr/bin/simg2img bin/Linux/x86_64/simg2img
+          test "$(readlink -f bin/Linux/x86_64/simg2img)" = "/usr/bin/simg2img"
+
       - name: Support custom ROM filenames
         working-directory: toolbuild
         run: |
