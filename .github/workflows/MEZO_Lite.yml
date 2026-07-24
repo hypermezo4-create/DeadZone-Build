@@ -1,0 +1,181 @@
+name: "🔥 MEZO_Lite"
+
+on:
+  workflow_dispatch:
+    inputs:
+      rom_link:
+        description: "Direct ROM link for the DeadZone Lite build"
+        required: true
+      request_source:
+        description: "Request source label"
+        required: false
+        default: "github"
+      publish_release:
+        description: "Publish release automatically?"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: mezo-lite-build-queue
+  cancel-in-progress: false
+
+jobs:
+  Initialize:
+    name: "🔥 Build MEZO Lite"
+    runs-on: ubuntu-latest
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      MEZO_PRIVATE_CHAT_ID: ${{ secrets.MEZO_PRIVATE_CHAT_ID }}
+      TELEGRAM_RELEASE_GROUP_ID: ${{ secrets.TELEGRAM_RELEASE_GROUP_ID }}
+      MEZO_CONTACT_LINK: ${{ secrets.MEZO_CONTACT_LINK }}
+      UPDATES_GROUP_LINK: ${{ secrets.UPDATES_GROUP_LINK }}
+      SCREENSHOTS_GROUP_LINK: ${{ secrets.SCREENSHOTS_GROUP_LINK }}
+      CHAT_GROUP_LINK: ${{ secrets.CHAT_GROUP_LINK }}
+      CHANGELOG_LINK: ${{ secrets.CHANGELOG_LINK }}
+      SCREENSHOTS_POST_LINK: ${{ secrets.SCREENSHOTS_POST_LINK }}
+      RCLONE_CONFIG_BASE64: ${{ secrets.RCLONE_CONFIG_BASE64 }}
+      RCLONE_REMOTE_NAME: ${{ secrets.RCLONE_REMOTE_NAME }}
+      RCLONE_UPLOAD_DIR: ${{ secrets.RCLONE_UPLOAD_DIR }}
+      REQUEST_SOURCE: ${{ inputs.request_source }}
+      PUBLISH_RELEASE: ${{ inputs.publish_release }}
+
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          swap-size-mb: 1024
+          root-reserve-mb: 512
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+
+      - name: Clean unused files and applications
+        run: |
+          docker rmi $(docker images -q) || true
+          sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php || true
+          sudo apt -y purge azure-cli ghc* zulu* hhvm llvm* firefox google* dotnet* powershell mysql* php* || true
+          sudo apt -y autoremove --purge || true
+          sudo apt -y autoclean || true
+          sudo apt clean || true
+
+      - name: Clone private MEZO Lite source
+        uses: actions/checkout@v4
+        with:
+          repository: hypermezo4-create/DeadZone_Lite
+          token: ${{ secrets.GH_TOKEN }}
+          path: toolbuild
+          lfs: true
+
+      - name: Notify MEZO about request
+        working-directory: toolbuild
+        run: python3 notify.py private request_received
+
+      - name: Set timezone
+        run: sudo timedatectl set-timezone Africa/Cairo
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Install dependencies
+        working-directory: toolbuild
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends software-properties-common ca-certificates curl gnupg file git
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test || true
+          sudo add-apt-repository -y universe || true
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            aria2 jq sshpass python-is-python3 wget python3 python3-pip lz4 xz-utils \
+            device-tree-compiler zlib1g-dev gcc g++ libc6 libstdc++6 dialog libgtk-3-dev \
+            busybox zip unzip p7zip-full zstd bc android-sdk-libsparse-utils golang-go
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends erofs-utils || true
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xmlstarlet || true
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends zipalign || true
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends aapt || true
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends rclone || curl -fsSL https://rclone.org/install.sh | sudo bash
+          sudo env "GOBIN=/usr/local/bin" go install github.com/ssut/payload-dumper-go/cmd/payload-dumper-go@latest || true
+          python3 -m pip install --user --upgrade pip
+          python3 -m pip install --user ConfigObj requests telebot setuptools
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Grant file permissions
+        working-directory: toolbuild
+        run: sudo chmod 777 -R *
+
+      - name: Build ROM
+        working-directory: toolbuild
+        env:
+          INPUT_URL: ${{ inputs.rom_link }}
+        run: |
+          set -e
+          set -o pipefail
+          echo "CURRENT_STAGE=parse_rom_metadata" >> "$GITHUB_ENV"
+          sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash build.sh "$INPUT_URL"
+
+      - name: Pack ROM
+        working-directory: toolbuild
+        run: |
+          set -e
+          set -o pipefail
+          echo "CURRENT_STAGE=package" >> "$GITHUB_ENV"
+          python3 notify.py private packaging_started
+          sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash packROM.sh
+
+      - name: Set up Rclone
+        working-directory: toolbuild
+        run: |
+          set -e
+          set -o pipefail
+          echo "CURRENT_STAGE=setup_rclone" >> "$GITHUB_ENV"
+          sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash uploadROM.sh setup
+
+      - name: Upload ROM to Google Drive
+        working-directory: toolbuild
+        run: |
+          set -e
+          set -o pipefail
+          echo "CURRENT_STAGE=upload_drive" >> "$GITHUB_ENV"
+          python3 notify.py private upload_started
+          sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash uploadROM.sh
+
+      - name: Send success notification
+        if: success()
+        working-directory: toolbuild
+        run: python3 notify.py private success
+
+      - name: Publish release
+        id: release_post
+        if: success() && (startsWith(inputs.request_source, 'telegram') || inputs.publish_release == 'true')
+        continue-on-error: true
+        working-directory: toolbuild
+        run: |
+          echo "CURRENT_STAGE=release_notification" >> "$GITHUB_ENV"
+          python3 notify.py release success
+
+      - name: Request manual publish decision
+        if: success() && !startsWith(inputs.request_source, 'telegram') && inputs.publish_release != 'true'
+        working-directory: toolbuild
+        run: python3 notify.py private publish_prompt
+
+      - name: Send release notification failure
+        if: steps.release_post.outcome == 'failure'
+        working-directory: toolbuild
+        run: python3 notify.py private fail release_notification
+
+      - name: Send failure notification
+        if: failure()
+        working-directory: toolbuild
+        run: python3 notify.py private fail
+
+      - name: Send cancellation notification
+        if: cancelled()
+        working-directory: toolbuild
+        run: python3 notify.py private fail cancelled
