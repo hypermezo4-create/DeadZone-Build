@@ -72,8 +72,9 @@ jobs:
 
       - name: Notify MEZO about request
         working-directory: toolbuild
-        run: python3 notify.py private request_received
-
+        run: |
+          python3 -m pip install --user ConfigObj requests telebot setuptools
+          python3 notify.py private request_received
       - name: Set timezone
         run: sudo timedatectl set-timezone Africa/Cairo
 
