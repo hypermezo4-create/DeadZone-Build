@@ -104,7 +104,7 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends zipalign || true
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends aapt || true
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends rclone || curl -fsSL https://rclone.org/install.sh | sudo bash
-          python3 -m pip install --user ConfigObj setuptools
+          python3 -m pip install --user ConfigObj setuptools "gdown==5.2.0"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Grant required file permissions
@@ -129,6 +129,15 @@ jobs:
           set -o pipefail
           echo "CURRENT_STAGE=parse_rom_metadata" >> "$GITHUB_ENV"
           sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash build.sh "$INPUT_URL" 2>&1 | tee build_action.log
+
+      - name: Upload build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deadzone-lite-build-diagnostics
+          path: toolbuild/build_action.log
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Send packaging notification
         continue-on-error: true
