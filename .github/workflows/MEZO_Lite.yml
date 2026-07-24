@@ -29,6 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHANNEL_ID: ${{ secrets.MEZO_PRIVATE_CHAT_ID }}
       MEZO_PRIVATE_CHAT_ID: ${{ secrets.MEZO_PRIVATE_CHAT_ID }}
       TELEGRAM_RELEASE_GROUP_ID: ${{ secrets.TELEGRAM_RELEASE_GROUP_ID }}
       MEZO_CONTACT_LINK: ${{ secrets.MEZO_CONTACT_LINK }}
@@ -70,11 +71,15 @@ jobs:
           path: toolbuild
           lfs: true
 
-      - name: Notify MEZO about request
+      - name: Install notification dependencies
         working-directory: toolbuild
-        run: |
-          python3 -m pip install --user ConfigObj requests telebot setuptools
-          python3 notify.py private request_received
+        run: python3 -m pip install --user requests
+
+      - name: Notify MEZO about request
+        continue-on-error: true
+        working-directory: toolbuild
+        run: python3 notify.py "start" "DeadZone_Lite" "${{ inputs.rom_link }}" "mezo-lite"
+
       - name: Set timezone
         run: sudo timedatectl set-timezone Africa/Cairo
 
@@ -104,7 +109,7 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends rclone || curl -fsSL https://rclone.org/install.sh | sudo bash
           sudo env "GOBIN=/usr/local/bin" go install github.com/ssut/payload-dumper-go/cmd/payload-dumper-go@latest || true
           python3 -m pip install --user --upgrade pip
-          python3 -m pip install --user ConfigObj requests telebot setuptools
+          python3 -m pip install --user ConfigObj telebot setuptools
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Grant file permissions
@@ -121,13 +126,17 @@ jobs:
           echo "CURRENT_STAGE=parse_rom_metadata" >> "$GITHUB_ENV"
           sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash build.sh "$INPUT_URL"
 
+      - name: Send packaging notification
+        continue-on-error: true
+        working-directory: toolbuild
+        run: python3 notify.py "pack" "DeadZone_Lite" "${{ inputs.rom_link }}" "mezo-lite"
+
       - name: Pack ROM
         working-directory: toolbuild
         run: |
           set -e
           set -o pipefail
           echo "CURRENT_STAGE=package" >> "$GITHUB_ENV"
-          python3 notify.py private packaging_started
           sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash packROM.sh
 
       - name: Set up Rclone
@@ -138,45 +147,62 @@ jobs:
           echo "CURRENT_STAGE=setup_rclone" >> "$GITHUB_ENV"
           sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash uploadROM.sh setup
 
+      - name: Send upload notification
+        continue-on-error: true
+        working-directory: toolbuild
+        run: python3 notify.py "upload" "DeadZone_Lite" "${{ inputs.rom_link }}" "mezo-lite"
+
       - name: Upload ROM to Google Drive
         working-directory: toolbuild
         run: |
           set -e
           set -o pipefail
           echo "CURRENT_STAGE=upload_drive" >> "$GITHUB_ENV"
-          python3 notify.py private upload_started
           sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash uploadROM.sh
 
       - name: Send success notification
         if: success()
+        continue-on-error: true
         working-directory: toolbuild
-        run: python3 notify.py private success
+        run: python3 notify.py "success" "DeadZone_Lite" "${{ inputs.rom_link }}" "mezo-lite"
 
       - name: Publish release
         id: release_post
         if: success() && (startsWith(inputs.request_source, 'telegram') || inputs.publish_release == 'true')
         continue-on-error: true
         working-directory: toolbuild
+        env:
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_RELEASE_GROUP_ID }}
         run: |
           echo "CURRENT_STAGE=release_notification" >> "$GITHUB_ENV"
-          python3 notify.py release success
+          notify_output="$(python3 notify.py "success" "DeadZone_Lite" "${{ inputs.rom_link }}" "mezo-lite" 2>&1)"
+          printf '%s\n' "$notify_output"
+          if grep -Eq '\[notify\] (Telegram secrets are missing|send failed:)' <<< "$notify_output"; then
+            exit 1
+          fi
 
       - name: Request manual publish decision
         if: success() && !startsWith(inputs.request_source, 'telegram') && inputs.publish_release != 'true'
+        continue-on-error: true
         working-directory: toolbuild
-        run: python3 notify.py private publish_prompt
+        run: python3 notify.py "success" "DeadZone_Lite" "${{ inputs.rom_link }}" "mezo-lite"
 
       - name: Send release notification failure
         if: steps.release_post.outcome == 'failure'
+        continue-on-error: true
         working-directory: toolbuild
-        run: python3 notify.py private fail release_notification
+        env:
+          NOTIFY_ERROR_REASON: "Release notification failed; the ROM build and upload completed successfully."
+        run: python3 notify.py "fail" "DeadZone_Lite" "${{ inputs.rom_link }}" "mezo-lite"
 
       - name: Send failure notification
         if: failure()
+        continue-on-error: true
         working-directory: toolbuild
-        run: python3 notify.py private fail
+        run: python3 notify.py "fail" "DeadZone_Lite" "${{ inputs.rom_link }}" "mezo-lite"
 
       - name: Send cancellation notification
         if: cancelled()
+        continue-on-error: true
         working-directory: toolbuild
-        run: python3 notify.py private fail cancelled
+        run: python3 notify.py "cancelled" "DeadZone_Lite" "${{ inputs.rom_link }}" "mezo-lite"
