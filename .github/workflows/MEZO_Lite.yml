@@ -124,13 +124,50 @@ jobs:
           test -x bin/Linux/x86_64/payload-extract
           bin/Linux/x86_64/payload-extract --help >/dev/null 2>&1 || true
 
-      - name: Prefer system Android sparse tools
+      - name: Support split raw and sparse images
         working-directory: toolbuild
         run: |
           set -euo pipefail
           test -x /usr/bin/simg2img
-          ln -sf /usr/bin/simg2img bin/Linux/x86_64/simg2img
-          test "$(readlink -f bin/Linux/x86_64/simg2img)" = "/usr/bin/simg2img"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("build.sh")
+          text = path.read_text(encoding="utf-8")
+          old = '''    unpack "Merging split super.img files"
+              simg2img build/baserom/images/super.img.* build/baserom/images/super.img
+              rm -rf build/baserom/images/super.img.*
+              mv build/baserom/images/super.img build/baserom/super.img
+              if [[ -f build/baserom/images/cust.img.0 ]]; then
+                  simg2img build/baserom/images/cust.img.* build/baserom/images/cust.img
+                  rm -rf build/baserom/images/cust.img.*
+              fi'''
+          new = '''    unpack "Merging split super.img files"
+              mapfile -d '' super_parts < <(find build/baserom/images -maxdepth 1 -type f -name 'super.img.*' -print0 | sort -zV)
+              [[ ${#super_parts[@]} -gt 0 ]] || { error "No split super.img parts were found"; exit 1; }
+              super_magic=$(od -An -tx1 -N4 "${super_parts[0]}" 2>/dev/null | tr -d '[:space:]')
+              if [[ "$super_magic" == "3aff26ed" ]]; then
+                  /usr/bin/simg2img "${super_parts[@]}" build/baserom/images/super.img
+              else
+                  cat "${super_parts[@]}" > build/baserom/images/super.img
+              fi
+              rm -f "${super_parts[@]}"
+              mv build/baserom/images/super.img build/baserom/super.img
+              if [[ -f build/baserom/images/cust.img.0 ]]; then
+                  mapfile -d '' cust_parts < <(find build/baserom/images -maxdepth 1 -type f -name 'cust.img.*' -print0 | sort -zV)
+                  cust_magic=$(od -An -tx1 -N4 "${cust_parts[0]}" 2>/dev/null | tr -d '[:space:]')
+                  if [[ "$cust_magic" == "3aff26ed" ]]; then
+                      /usr/bin/simg2img "${cust_parts[@]}" build/baserom/images/cust.img
+                  else
+                      cat "${cust_parts[@]}" > build/baserom/images/cust.img
+                  fi
+                  rm -f "${cust_parts[@]}"
+              fi'''
+          if old not in text:
+              raise SystemExit("Expected split image merge block was not found")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+          bash -n build.sh
 
       - name: Support custom ROM filenames
         working-directory: toolbuild
