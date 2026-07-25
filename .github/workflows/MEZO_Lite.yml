@@ -68,7 +68,7 @@ jobs:
           path: toolbuild
           fetch-depth: 1
           lfs: true
-          ref: ${{ github.ref_name == 'agent/fix-super-unpack' && 'agent/fix-super-unpack' || 'main' }}
+          ref: main
 
       - name: Install notification dependencies
         working-directory: toolbuild
@@ -133,6 +133,7 @@ jobs:
           test -f bin/supermeta.py
           python3 bin/supermeta.py --help >/dev/null
           bash -n build.sh
+          bash -n packROM.sh
 
       - name: Support custom ROM filenames
         working-directory: toolbuild
@@ -195,7 +196,18 @@ jobs:
           set -e
           set -o pipefail
           echo "CURRENT_STAGE=package" >> "$GITHUB_ENV"
-          sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash packROM.sh
+          sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash packROM.sh 2>&1 | tee pack_action.log
+
+      - name: Upload pack diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deadzone-lite-pack-diagnostics
+          path: |
+            toolbuild/pack_action.log
+            toolbuild/build/pack_diagnostics
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Set up Rclone
         working-directory: toolbuild
