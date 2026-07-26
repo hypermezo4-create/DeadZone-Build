@@ -1,0 +1,69 @@
+name: DeadZone Workflow Contract CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout workflows
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Parse workflow YAML
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ruby -e 'require "yaml"; Dir[".github/workflows/*.{yml,yaml}"].sort.each { |f| YAML.load_file(f); puts "OK #{f}" }'
+
+      - name: Enforce request-ID-only public inputs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          workflows=(
+            .github/workflows/MEZO_Lite.yml
+            .github/workflows/frameworkpatcher.yml
+            .github/workflows/gamingplus.yml
+          )
+          for workflow in "${workflows[@]}"; do
+            test -s "$workflow"
+            head -n 35 "$workflow" | grep -q 'request_id:'
+            if head -n 35 "$workflow" | grep -Eq 'builder_name:|builder_id:|rom_link:|input_url:|framework_url:|services_url:'; then
+              echo "Sensitive workflow_dispatch input found in $workflow" >&2
+              exit 1
+            fi
+            grep -q '^run-name:.*inputs.request_id' "$workflow"
+          done
+
+      - name: Reject hardcoded private repository names
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if grep -REn 'hypermezo4-create/(DeadZone_Lite|FrameworkPatcher-DeadZone|GamingPlus-DeadZone|FrameworkPatcherModule)' .github/workflows; then
+            echo 'A private repository name is hardcoded in the public launcher.' >&2
+            exit 1
+          fi
+
+      - name: Verify private contract endpoint usage
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for workflow in MEZO_Lite.yml frameworkpatcher.yml gamingplus.yml; do
+            grep -q 'deadzonebot.fly.dev/contract/resolve' ".github/workflows/$workflow"
+            grep -q 'BUILD_PROGRESS_SECRET' ".github/workflows/$workflow"
+            grep -q 'X-DeadZone-Signature' ".github/workflows/$workflow"
+            grep -q 'deadzone-result-${{ inputs.request_id }}' ".github/workflows/$workflow"
+          done
