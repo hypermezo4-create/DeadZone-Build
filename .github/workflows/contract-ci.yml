@@ -81,15 +81,19 @@ jobs:
             exit 1
           fi
 
-      - name: Verify canonical workflows use private contract resolution
+      - name: Verify canonical workflows use V3 private contract resolution
         shell: bash
         run: |
           set -Eeuo pipefail
+          production='deadzone-mezo-v3-20260726.fly.dev'
           for workflow in MEZO_Lite.yml frameworkpatcher.yml gamingplus.yml; do
-            grep -q 'deadzonebot.fly.dev/contract/resolve' ".github/workflows/$workflow"
-            grep -q 'BUILD_PROGRESS_SECRET' ".github/workflows/$workflow"
-            grep -q 'X-DeadZone-Signature' ".github/workflows/$workflow"
-            grep -q 'deadzone-result-${{ inputs.request_id }}' ".github/workflows/$workflow"
+            path=".github/workflows/$workflow"
+            grep -q "$production/contract/resolve" "$path"
+            grep -q "$production/telemetry" "$path"
+            ! grep -q 'deadzonebot.fly.dev' "$path"
+            grep -q 'BUILD_PROGRESS_SECRET' "$path"
+            grep -q 'X-DeadZone-Signature' "$path"
+            grep -q 'deadzone-result-${{ inputs.request_id }}' "$path"
           done
 
       - name: Keep member-facing labels provider-neutral
