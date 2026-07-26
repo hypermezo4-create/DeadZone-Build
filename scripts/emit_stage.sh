@@ -33,13 +33,12 @@ if ! python3 "$script_dir/send_telemetry.py" \
   printf '%s\n' '[DeadZone System] live update deferred; build continues.' >&2
 fi
 
-# Bot-triggered Lite builds hand the already-created Telegram message to the
-# Lite renderer once the real engine is available. The renderer edits that same
-# message ID from the signed contract, so there is one live screen only.
+# build.sh owns Start -> Download -> Extract -> Build so the visible progress
+# never jumps backwards. The launcher only bridges the later stages to the
+# same Lite message after build.sh returns.
 if [[ "${DEADZONE_CONTROLLED_BUILD:-0}" == "1" && -f "$repo_root/engine/notify.py" ]]; then
   notify_stage=""
   case "$stage_key:$stage_state" in
-    building:in_progress) notify_stage="build" ;;
     packaging:in_progress) notify_stage="pack" ;;
     preparing_upload:in_progress) notify_stage="pack" ;;
     uploading:in_progress) notify_stage="upload" ;;
