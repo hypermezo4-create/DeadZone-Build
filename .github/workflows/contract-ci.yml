@@ -5,9 +5,11 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/**'
+      - 'scripts/**'
   pull_request:
     paths:
       - '.github/workflows/**'
+      - 'scripts/**'
   workflow_dispatch:
 
 permissions:
@@ -29,13 +31,19 @@ jobs:
           set -Eeuo pipefail
           ruby -e 'require "yaml"; Dir[".github/workflows/*.{yml,yaml}"].sort.each { |f| YAML.load_file(f); puts "OK #{f}" }'
 
-      - name: Enforce request-ID-only public inputs
+      - name: Compile telemetry sender
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -m py_compile scripts/send_telemetry.py
+          bash -n scripts/emit_stage.sh
+
+      - name: Enforce request-ID-only Control Bot workflows
         shell: bash
         run: |
           set -Eeuo pipefail
           workflows=(
             .github/workflows/MEZO_Lite.yml
-            .github/workflows/Lite_Test.yml
             .github/workflows/frameworkpatcher.yml
             .github/workflows/gamingplus.yml
           )
@@ -43,11 +51,26 @@ jobs:
             test -s "$workflow"
             head -n 45 "$workflow" | grep -q 'request_id:'
             if head -n 45 "$workflow" | grep -Eq 'builder_name:|builder_id:|rom_link:|input_url:|framework_url:|services_url:|telegram_user_id:'; then
-              echo "Sensitive workflow_dispatch input found in $workflow" >&2
+              echo "Sensitive Control Bot workflow input found in $workflow" >&2
               exit 1
             fi
             grep -q '^run-name:.*inputs.request_id' "$workflow"
           done
+
+      - name: Verify direct GitHub build entry points
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -s .github/workflows/Lite_Test.yml
+          test -s .github/workflows/GamingPlus_Direct.yml
+          test -s .github/workflows/FrameworkPatcher_Direct.yml
+          grep -q 'rom_link:' .github/workflows/Lite_Test.yml
+          grep -q 'rom_link:' .github/workflows/GamingPlus_Direct.yml
+          grep -q 'android_version:' .github/workflows/FrameworkPatcher_Direct.yml
+          grep -q 'framework_url:' .github/workflows/FrameworkPatcher_Direct.yml
+          grep -q 'LITE_ENGINE_REPOSITORY' .github/workflows/Lite_Test.yml
+          grep -q 'GAMINGPLUS_ENGINE_REPOSITORY' .github/workflows/GamingPlus_Direct.yml
+          grep -q 'FRAMEWORK_ENGINE_REPOSITORY' .github/workflows/FrameworkPatcher_Direct.yml
 
       - name: Reject hardcoded private repository names
         shell: bash
@@ -69,9 +92,17 @@ jobs:
             grep -q 'deadzone-result-${{ inputs.request_id }}' ".github/workflows/$workflow"
           done
 
-      - name: Verify Lite Test delegates to canonical Lite
+      - name: Keep member-facing labels provider-neutral
         shell: bash
         run: |
           set -Eeuo pipefail
-          grep -q 'uses: ./.github/workflows/MEZO_Lite.yml' .github/workflows/Lite_Test.yml
-          grep -q 'secrets: inherit' .github/workflows/Lite_Test.yml
+          # Direct workflow display names and explicit live-step labels use the
+          # DeadZone identity. Provider names are allowed only in implementation
+          # mechanics such as action identifiers and internal comments.
+          for workflow in Lite_Test.yml GamingPlus_Direct.yml FrameworkPatcher_Direct.yml; do
+            grep -q 'DeadZone' ".github/workflows/$workflow"
+            if grep -E 'name: .*GitHub|name: .*Fly|name: .*Runner' ".github/workflows/$workflow"; then
+              echo "Provider-facing live step label found in $workflow" >&2
+              exit 1
+            fi
+          done
