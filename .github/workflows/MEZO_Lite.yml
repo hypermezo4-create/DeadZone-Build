@@ -43,6 +43,7 @@ jobs:
     env:
       CONTROL_BOT_CONTRACT_URL: https://deadzone-mezo-v3-20260726.fly.dev/contract/resolve
       CONTROL_BOT_TELEMETRY_URL: https://deadzone-mezo-v3-20260726.fly.dev/telemetry
+      BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       MEZO_PRIVATE_CHAT_ID: ${{ secrets.MEZO_PRIVATE_CHAT_ID }}
       TELEGRAM_RELEASE_GROUP_ID: ${{ secrets.TELEGRAM_RELEASE_GROUP_ID }}
@@ -70,7 +71,6 @@ jobs:
           INPUT_REQUEST_ID: ${{ inputs.request_id }}
           INPUT_ROM_LINK: ${{ inputs.rom_link }}
           INPUT_BUILDER_LABEL: ${{ inputs.builder_label }}
-          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
         run: |
           set -Eeuo pipefail
           if [[ -n "${INPUT_REQUEST_ID:-}" ]]; then
@@ -126,6 +126,10 @@ jobs:
           fi
           echo "BUILD_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
 
+      - name: Live — prepare Lite
+        if: steps.mode.outputs.mode == 'bot'
+        run: bash scripts/emit_stage.sh preparing in_progress 0 "Preparing DeadZone Lite."
+
       - name: Validate private source configuration
         shell: bash
         env:
@@ -149,6 +153,10 @@ jobs:
           remove-haskell: "true"
           remove-docker-images: "true"
 
+      - name: Live — load Lite engine
+        if: steps.mode.outputs.mode == 'bot'
+        run: bash scripts/emit_stage.sh loading_engine in_progress 1 "Loading DeadZone Lite."
+
       - name: Load DeadZone Lite engine
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -159,6 +167,10 @@ jobs:
           fetch-depth: 1
           lfs: true
           persist-credentials: false
+
+      - name: Live — prepare Lite tools
+        if: steps.mode.outputs.mode == 'bot'
+        run: bash scripts/emit_stage.sh installing_tools in_progress 2 "Preparing Lite tools."
 
       - name: Prepare Lite environment
         working-directory: engine
@@ -190,8 +202,20 @@ jobs:
           set -Eeuo pipefail
           rom="$(printf '%s' "$ROM_URL_B64" | base64 --decode)"
           export BUILDER_NAME="$(printf '%s' "$BUILDER_NAME_B64" | base64 --decode)"
+
+          if [[ "${DEADZONE_CONTROLLED_BUILD:-0}" == "1" ]]; then
+            bash "$GITHUB_WORKSPACE/scripts/emit_stage.sh" building in_progress 3 "Building DeadZone Lite."
+          fi
           sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash build.sh "$rom" 2>&1 | tee build_action.log
+
+          if [[ "${DEADZONE_CONTROLLED_BUILD:-0}" == "1" ]]; then
+            bash "$GITHUB_WORKSPACE/scripts/emit_stage.sh" packaging in_progress 4 "Packaging DeadZone Lite."
+          fi
           sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash packROM.sh 2>&1 | tee pack_action.log
+
+          if [[ "${DEADZONE_CONTROLLED_BUILD:-0}" == "1" ]]; then
+            bash "$GITHUB_WORKSPACE/scripts/emit_stage.sh" preparing_upload in_progress 5 "Preparing Lite delivery."
+          fi
           base_dir="${RCLONE_UPLOAD_DIR%/}"
           if [[ "${DEADZONE_CONTROLLED_BUILD:-0}" == "1" ]]; then
             export RCLONE_UPLOAD_DIR="${base_dir}/lite/${BUILDER_SLUG}_${BUILDER_ID}/${REQUEST_ID}"
@@ -199,7 +223,15 @@ jobs:
             export RCLONE_UPLOAD_DIR="${base_dir}/lite/direct/${GITHUB_ACTOR}/${GITHUB_RUN_ID}"
           fi
           sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash uploadROM.sh setup
+
+          if [[ "${DEADZONE_CONTROLLED_BUILD:-0}" == "1" ]]; then
+            bash "$GITHUB_WORKSPACE/scripts/emit_stage.sh" uploading in_progress 6 "Uploading DeadZone Lite."
+          fi
           sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash uploadROM.sh 2>&1 | tee upload_action.log
+
+          if [[ "${DEADZONE_CONTROLLED_BUILD:-0}" == "1" ]]; then
+            bash "$GITHUB_WORKSPACE/scripts/emit_stage.sh" finalizing in_progress 7 "Final verification."
+          fi
 
       - name: Create result contract
         working-directory: engine
@@ -228,6 +260,14 @@ jobs:
           result = {"schema_version":"1.0","request_id":os.environ["REQUEST_ID"],"project":"lite","status":"success","provider":"google_drive","url":link,"file_name":artifact.name,"sha256":hashlib.sha256(artifact.read_bytes()).hexdigest(),"size":artifact.stat().st_size,"completed_at":datetime.now(timezone.utc).isoformat()}
           Path("../deadzone-result.json").write_text(json.dumps(result, sort_keys=True, indent=2), encoding="utf-8")
           PY
+
+      - name: Live — Lite verified
+        if: success() && steps.mode.outputs.mode == 'bot'
+        run: bash scripts/emit_stage.sh finalizing success 8 "DeadZone Lite completed."
+
+      - name: Live — Lite failed
+        if: failure() && steps.mode.outputs.mode == 'bot'
+        run: bash scripts/emit_stage.sh "${DZ_CURRENT_STAGE_KEY:-preparing}" failed "${DZ_COMPLETED_STAGES:-0}" "DeadZone Lite stopped safely."
 
       - name: Expose verified result
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
