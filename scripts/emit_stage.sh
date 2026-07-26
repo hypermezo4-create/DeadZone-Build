@@ -27,6 +27,7 @@ repo_root="$(cd "$script_dir/.." 2>/dev/null && pwd || true)"
 stage_started_at="${DZ_STAGE_STARTED_AT:-${BUILD_STARTED_AT:-}}"
 request_id="${REQUEST_ID:-}"
 sound_pid_file="${RUNNER_TEMP:-/tmp}/deadzone-lite-sound-${request_id:-build}.pid"
+sound_log_file="${RUNNER_TEMP:-/tmp}/deadzone-lite-sound-${request_id:-build}.log"
 
 stop_sound_reminder() {
   [[ -f "$sound_pid_file" ]] || return 0
@@ -47,7 +48,12 @@ start_sound_reminder() {
     || return 0
   [[ -f "$sound_pid_file" ]] && return 0
 
-  nohup bash "$script_dir/build_sound_reminder.sh" >/dev/null 2>&1 &
+  # Prove the Telegram audio path synchronously so failures are visible in the
+  # workflow log instead of disappearing inside a detached process.
+  bash "$script_dir/build_sound_reminder.sh" once || true
+
+  # Later reminders remain detached and non-blocking.
+  nohup bash "$script_dir/build_sound_reminder.sh" loop >"$sound_log_file" 2>&1 &
   printf '%s\n' "$!" > "$sound_pid_file" 2>/dev/null || true
 }
 
