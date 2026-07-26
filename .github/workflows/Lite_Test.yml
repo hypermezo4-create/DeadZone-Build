@@ -1,21 +1,195 @@
-name: "Lite Test"
+name: "⚡ DeadZone Lite — Direct Build"
 
-run-name: "Lite Test  ${{ inputs.request_id }}"
+run-name: "DeadZone Lite Direct • ${{ github.actor }} • #${{ github.run_number }}"
 
 on:
   workflow_dispatch:
     inputs:
-      request_id:
-        description: "Existing DeadZone Lite request ID"
+      rom_link:
+        description: "Direct HTTPS ROM link"
         required: true
+        type: string
+      builder_label:
+        description: "Optional builder display label"
+        required: false
         type: string
 
 permissions:
   contents: read
 
+concurrency:
+  group: deadzone-lite-direct
+  cancel-in-progress: false
+
 jobs:
-  canonical-lite:
-    uses: ./.github/workflows/MEZO_Lite.yml
-    with:
-      request_id: ${{ inputs.request_id }}
-    secrets: inherit
+  build:
+    name: "⚡ Build DeadZone Lite"
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      REQUEST_ID: "DZ-LT-DIRECT-${{ github.run_id }}"
+      BUILDER_NAME: ${{ inputs.builder_label || github.actor }}
+      BUILDER_ID: ""
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+      RCLONE_CONFIG_BASE64: ${{ secrets.RCLONE_CONFIG_BASE64 }}
+      RCLONE_REMOTE_NAME: ${{ secrets.RCLONE_REMOTE_NAME }}
+      RCLONE_UPLOAD_DIR: ${{ secrets.RCLONE_UPLOAD_DIR }}
+
+    steps:
+      - name: Validate direct request
+        shell: bash
+        env:
+          ROM_LINK: ${{ inputs.rom_link }}
+          LITE_ENGINE_REPOSITORY: ${{ secrets.LITE_ENGINE_REPOSITORY }}
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$ROM_LINK" == https://* ]] || { echo "ROM link must use HTTPS" >&2; exit 1; }
+          [[ -n "$LITE_ENGINE_REPOSITORY" ]] || { echo "Missing LITE_ENGINE_REPOSITORY" >&2; exit 1; }
+          [[ -n "$PRIVATE_REPO_TOKEN" ]] || { echo "Missing private repository token" >&2; exit 1; }
+          for key in RCLONE_CONFIG_BASE64 RCLONE_REMOTE_NAME RCLONE_UPLOAD_DIR; do
+            [[ -n "${!key:-}" ]] || { echo "Missing $key" >&2; exit 1; }
+          done
+          echo "::add-mask::$ROM_LINK"
+          printf '%s' "$ROM_LINK" | base64 -w0 > "$RUNNER_TEMP/deadzone-lite-rom.b64"
+
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
+        with:
+          swap-size-mb: 1024
+          root-reserve-mb: 4096
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-docker-images: "true"
+
+      - name: Load DeadZone Lite engine
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ${{ secrets.LITE_ENGINE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_TOKEN }}
+          path: toolbuild
+          fetch-depth: 1
+          lfs: true
+          ref: main
+          persist-credentials: false
+
+      - name: Prepare DeadZone System
+        working-directory: toolbuild
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            aria2 jq sshpass python-is-python3 wget python3-pip lz4 xz-utils \
+            device-tree-compiler zlib1g-dev gcc g++ libc6 libstdc++6 dialog libgtk-3-dev \
+            busybox zip unzip p7zip-full zstd bc android-sdk-libsparse-utils rclone
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends erofs-utils xmlstarlet zipalign aapt || true
+          python3 -m pip install --user ConfigObj setuptools "gdown==5.2.0" requests
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          chmod +x build.sh packROM.sh uploadROM.sh
+          find bin -type f -name '*.sh' -exec chmod +x {} +
+          chmod +x bin/Linux/x86_64/*
+          bash -n build.sh
+          bash -n packROM.sh
+          bash -n uploadROM.sh
+          python3 -m py_compile notify.py
+
+      - name: Live — initialize Lite
+        working-directory: toolbuild
+        continue-on-error: true
+        shell: bash
+        run: |
+          rom="$(base64 --decode "$RUNNER_TEMP/deadzone-lite-rom.b64")"
+          python3 notify.py start "DeadZone System" "$rom" lite "$BUILDER_NAME" "$BUILDER_ID"
+
+      - name: Live — process base ROM
+        working-directory: toolbuild
+        continue-on-error: true
+        shell: bash
+        run: |
+          rom="$(base64 --decode "$RUNNER_TEMP/deadzone-lite-rom.b64")"
+          python3 notify.py download "DeadZone System" "$rom" lite "$BUILDER_NAME" "$BUILDER_ID"
+
+      - name: Build DeadZone Lite
+        working-directory: toolbuild
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rom="$(base64 --decode "$RUNNER_TEMP/deadzone-lite-rom.b64")"
+          sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \
+            bash build.sh "$rom" 2>&1 | tee build_action.log
+
+      - name: Live — package Lite
+        working-directory: toolbuild
+        continue-on-error: true
+        shell: bash
+        run: |
+          rom="$(base64 --decode "$RUNNER_TEMP/deadzone-lite-rom.b64")"
+          python3 notify.py pack "DeadZone System" "$rom" lite "$BUILDER_NAME" "$BUILDER_ID"
+
+      - name: Pack DeadZone Lite
+        working-directory: toolbuild
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \
+            bash packROM.sh 2>&1 | tee pack_action.log
+
+      - name: Live — deliver Lite
+        working-directory: toolbuild
+        continue-on-error: true
+        shell: bash
+        run: |
+          rom="$(base64 --decode "$RUNNER_TEMP/deadzone-lite-rom.b64")"
+          python3 notify.py upload "DeadZone System" "$rom" lite "$BUILDER_NAME" "$BUILDER_ID"
+
+      - name: Upload DeadZone Lite
+        working-directory: toolbuild
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          safe_builder="$(printf '%s' "$BUILDER_NAME" | tr -cs 'A-Za-z0-9._-' '_' | cut -c1-48)"
+          base_dir="${RCLONE_UPLOAD_DIR%/}"
+          export RCLONE_UPLOAD_DIR="${base_dir}/lite/direct/${safe_builder}/${GITHUB_RUN_ID}"
+          bash uploadROM.sh setup
+          bash uploadROM.sh
+
+      - name: Live — Lite complete
+        if: success()
+        working-directory: toolbuild
+        continue-on-error: true
+        shell: bash
+        run: |
+          rom="$(base64 --decode "$RUNNER_TEMP/deadzone-lite-rom.b64")"
+          python3 notify.py success "DeadZone System" "$rom" lite "$BUILDER_NAME" "$BUILDER_ID"
+
+      - name: Live — Lite failed
+        if: failure()
+        working-directory: toolbuild
+        continue-on-error: true
+        env:
+          NOTIFY_ERROR_LOG: build_action.log,pack_action.log
+        shell: bash
+        run: |
+          rom="$(base64 --decode "$RUNNER_TEMP/deadzone-lite-rom.b64" 2>/dev/null || true)"
+          python3 notify.py fail "DeadZone System" "$rom" lite "$BUILDER_NAME" "$BUILDER_ID"
+
+      - name: Upload private diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: deadzone-lite-direct-diagnostics-${{ github.run_id }}
+          path: |
+            toolbuild/build_action.log
+            toolbuild/pack_action.log
+            toolbuild/build/baserom/super_merge_diagnostics.txt
+            toolbuild/build/baserom/super_info.json
+          if-no-files-found: warn
+          retention-days: 3
+
+      - name: Remove temporary credentials
+        if: always()
+        shell: bash
+        run: rm -f -- "$RUNNER_TEMP/deadzone-lite-rom.b64" toolbuild/rclone.conf
