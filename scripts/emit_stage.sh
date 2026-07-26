@@ -9,6 +9,25 @@ message="${4:-}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 stage_started_at="${DZ_STAGE_STARTED_AT:-${BUILD_STARTED_AT:-}}"
+sound_pid_file="${RUNNER_TEMP:-/tmp}/deadzone-lite-sound-${REQUEST_ID:-build}.pid"
+
+stop_sound_reminder() {
+  [[ -f "$sound_pid_file" ]] || return 0
+  pid="$(cat "$sound_pid_file" 2>/dev/null || true)"
+  if [[ "$pid" =~ ^[0-9]+$ ]]; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+  rm -f "$sound_pid_file"
+}
+
+start_sound_reminder() {
+  [[ "${DEADZONE_CONTROLLED_BUILD:-0}" == "1" ]] || return 0
+  [[ -x "$script_dir/build_sound_reminder.sh" ]] || chmod +x "$script_dir/build_sound_reminder.sh" 2>/dev/null || return 0
+  [[ -f "$sound_pid_file" ]] && return 0
+  nohup bash "$script_dir/build_sound_reminder.sh" >/dev/null 2>&1 &
+  printf '%s\n' "$!" > "$sound_pid_file"
+}
 
 if [[ "$stage_state" == "in_progress" ]]; then
   stage_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -20,6 +39,11 @@ if [[ "$stage_state" == "in_progress" ]]; then
     } >> "$GITHUB_ENV" || printf '%s\n' '[DeadZone System] live environment update deferred; build continues.' >&2
   fi
 fi
+
+case "$stage_key:$stage_state" in
+  building:in_progress) start_sound_reminder ;;
+  finalizing:in_progress|finalizing:success|*:failed|*:cancelled) stop_sound_reminder ;;
+esac
 
 if ! python3 "$script_dir/send_telemetry.py" \
   --request-id "${REQUEST_ID:?request ID is required}" \
@@ -59,5 +83,6 @@ if [[ "${DEADZONE_CONTROLLED_BUILD:-0}" == "1" && -f "$repo_root/engine/notify.p
   fi
 fi
 
-# Live telemetry/rendering is observability only. It must never stop the build.
+# Live telemetry/rendering/reminders are observability only. They must never
+# stop the actual ROM build.
 exit 0
