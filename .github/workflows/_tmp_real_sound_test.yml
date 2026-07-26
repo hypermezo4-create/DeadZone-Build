@@ -1,0 +1,50 @@
+name: Temporary real sound smoke
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/_tmp_real_sound_test.yml
+
+permissions:
+  contents: write
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ github.token }}
+      - name: Send amplified T-main sound
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          MEZO_PRIVATE_CHAT_ID: ${{ secrets.MEZO_PRIVATE_CHAT_ID }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > /tmp/sound.b64 <<'B64'
+SUQzBAAAAAAAIlRTU0UAAAAOAAADTGF2ZjYxLjcuMTAwAAAAAAAAAAAAAAD/81jAAAAAAAAAAAAASW5mbwAAAA8AAAAPAAAE7AAzMzMzMzNBQUFBQUFBUFBQUFBQX19fX19fX21tbW1tbW18fHx8fHyKioqKioqKmZmZmZmZmaioqKioqLa2tra2trbFxcXFxcXF1NTU1NTU4uLi4uLi4vHx8fHx8fH///////8AAAAATGF2YzYxLjE5AAAAAAAAAAAAAAAAJALAAAAAAAAABOxRitWvAAAAAAAAAAAAAAD/8yjEAAyoskgBT8ABNM0zTJ2XM62e0RjLeF+A7gLYKsXM62en///+FSkjEYsXWBlszMYyCLiK4fikpKQyOHh6DEqf79/tYYr/8yjECA7QynAhmMgAv75U7fJLoRQ8TLwJv4fqVf///1XRQxEsdU4WUEofyGNlN3FjNampsv//tOgqEga/Ep0Gqv/9ylfKCED/8yjEBw7YriwB3OABwFVhEQDMRF81k/T1ZEMaiQeB0tdmiuWv///+5diLi2RUBGEwoYbJBuvfGsQg3JBaLWqXFFX//dZVEuv/8yjEBg3YriAA6Hqlq3LtQCmBoIGUzrHIISBAapdNrIrADL/W6kriDcxgAh0WTJ/lTFIUjB4A0BzLX6ltoWr//mTghwNprJj/8yjECQ5ArhwA6LqlIMAMwBDoxW941BGYwCAtOZwYldcZ/+dsW5ZA63TBkGDmSYjJolzCUDi1qxndjVKM5m0gS0s9mqOoWDb/8yjECw4YqhwABjoFMU/cNRBmMAQJUocOGI3T2O///v91I2/jO0hDAEBTCYPjnl2jQsYi1LSojNVStf//2xhL5w5iBzAAAM//8yjEDQyYqigA4HqlNgPbBISDa9IHllOMH/WdSVwwysvIYAiGZQVOZCAIJASzaKz1kYr//W2NJoNJcpYwCBJoGJnyAWLB5fv/8yjEFQwgsigA4fqoA1FbPT/RUKiBhIVCw0SnAGCiYJgAla40O01nKv//xfZAxlrLkegQDZiHO5oIHJZpnMNUuk//4Z0kbdz/8yjEHwwAqigA6HilV2HBw96iTR5WAwNXc/sapQn//8IbEgFZo6y2guDpipcpjuGKAhpb6RukAP96zpI2+jAwoABgiHJstIr/8yjEKgyIoiQA6HqlZaA2rQ+dEstV//3cY2XdbpEW9EgeaYzp4sHiwgWe8kXlgQ//9Z1JXACb5UD4wzuYKhWAguStcaHZdZz/8yjEMgyQsiAA4Lqklf//yYSo6u5iKJpgUMGdHgfvDQQHVrPzPXiD//mdiXvwzcwYATqvRNOkgwgAVBnJjVKEqv/+dfVWJTn/8yjEOgyIqhgA4HilaaiCVAwMO5qNrxGHADaNBsxTjT/1nSRt2FzlqDCYtPuSs1QHXMkc5fVqz/DCvMF/n3pJIBgYa/lxtsf/8yjEQgwQpgwA6HilSv01HLpKcDJb2z19R94MgswETjjtwKIwJCpdrjSGmq31alUgJwkTaCgCCphGcmoayCI6Vizp2O09nHX/8yjETAyQsgQA4Lill/483ZrSqXqYpSDSjQ8RPCADxl0nQFGzFRVMQU1FMy4xMDBVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVX/8yjEVAyoteAAHgw9VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU=
+B64
+          base64 -d /tmp/sound.b64 > /tmp/source.mp3
+          ffmpeg -hide_banner -loglevel error -y -i /tmp/source.mp3 -af 'volume=8dB' -c:a libmp3lame -b:a 128k /tmp/deadzone-test.mp3
+          ffprobe -v error -show_entries format=duration,size -of default=nw=1 /tmp/deadzone-test.mp3
+          response="$(curl --silent --show-error --fail-with-body \
+            -F "chat_id=${MEZO_PRIVATE_CHAT_ID}" \
+            -F "audio=@/tmp/deadzone-test.mp3;type=audio/mpeg" \
+            -F "title=DeadZone REAL SOUND TEST" \
+            -F "performer=T-main Vibe" \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendAudio")"
+          python3 - "$response" <<'PY'
+import json, sys
+obj = json.loads(sys.argv[1])
+if obj.get('ok') is not True:
+    raise SystemExit(obj.get('description') or 'Telegram rejected sound')
+print('REAL_SOUND_SENT_OK')
+PY
+          rm -f .github/workflows/_tmp_real_sound_test.yml
+          git config user.name deadzone-bot
+          git config user.email deadzone-bot@users.noreply.github.com
+          git add .github/workflows/_tmp_real_sound_test.yml
+          git commit -m 'test: remove real sound smoke after confirmed delivery'
+          git push origin HEAD:main
