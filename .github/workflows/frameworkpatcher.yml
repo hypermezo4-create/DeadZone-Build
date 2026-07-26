@@ -1,0 +1,480 @@
+name: DeadZone FrameworkPatcher Build
+
+run-name: "DeadZone FrameworkPatcher  ${{ inputs.request_id }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: Opaque DeadZone control request ID
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deadzone-frameworkpatcher
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build FrameworkPatcher privately
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      REQUEST_ID: ${{ inputs.request_id }}
+      CONTROL_BOT_CONTRACT_URL: https://deadzonebot.fly.dev/contract/resolve
+
+    steps:
+      - name: Validate public request ID
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ "$REQUEST_ID" =~ ^DZ-FP-[0-9]{8}-[0-9]{4}$ ]] || {
+            echo "Invalid FrameworkPatcher request ID" >&2
+            exit 1
+          }
+
+      - name: Resolve private request contract
+        shell: bash
+        env:
+          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
+        run: |
+          set -Eeuo pipefail
+          [[ -n "${BUILD_PROGRESS_SECRET:-}" ]] || { echo "Missing BUILD_PROGRESS_SECRET" >&2; exit 1; }
+          python3 - <<'PY'
+          import hashlib
+          import hmac
+          import json
+          import os
+          import re
+          import urllib.request
+          from datetime import datetime, timezone
+          from pathlib import Path
+          from urllib.parse import urlsplit
+
+          secret = os.environ["BUILD_PROGRESS_SECRET"]
+          request_id = os.environ["REQUEST_ID"]
+          payload = {
+              "schema_version": "1.0",
+              "request_id": request_id,
+              "project": "frameworkpatcher",
+              "timestamp": datetime.now(timezone.utc).isoformat(),
+          }
+          body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+          signature = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+          req = urllib.request.Request(
+              os.environ["CONTROL_BOT_CONTRACT_URL"],
+              data=body,
+              method="POST",
+              headers={"Content-Type": "application/json", "X-DeadZone-Signature": signature},
+          )
+          with urllib.request.urlopen(req, timeout=20) as response:
+              response_body = response.read()
+              response_signature = response.headers.get("X-DeadZone-Signature", "")
+          expected = hmac.new(secret.encode(), response_body, hashlib.sha256).hexdigest()
+          if not hmac.compare_digest(expected, response_signature):
+              raise SystemExit("Invalid control-bot response signature")
+          contract = json.loads(response_body)
+          if contract.get("request_id") != request_id or contract.get("project") != "frameworkpatcher":
+              raise SystemExit("Private contract mismatch")
+
+          options = contract.get("options") or {}
+          builder = contract.get("builder") or {}
+          android = str(options.get("android_version") or "")
+          device = str(options.get("device_name") or "")
+          rom_version = str(options.get("rom_version") or "")
+          features = options.get("features") or []
+          telegram_files = options.get("telegram_files") or {}
+          fields = ("framework_url", "services_url", "miui_services_url", "miui_framework_url")
+          urls = {key: str(options.get(key) or "") for key in fields}
+          allowed_features = {
+              "disable_signature_verification",
+              "cn_notification_fix",
+              "disable_secure_flag",
+              "kaorios_toolbox",
+              "add_gboard",
+          }
+          allowed_hosts = {
+              "drive.google.com", "docs.google.com", "github.com",
+              "raw.githubusercontent.com", "objects.githubusercontent.com",
+          }
+          if android not in {"13", "14", "15", "16"}:
+              raise SystemExit("Unsupported Android version")
+          if not re.fullmatch(r"[A-Za-z0-9_.-]{1,48}", device):
+              raise SystemExit("Invalid device label")
+          if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,63}", rom_version):
+              raise SystemExit("Invalid ROM version")
+          if not isinstance(features, list) or not features or len(features) != len(set(features)):
+              raise SystemExit("Invalid feature selection")
+          if any(item not in allowed_features for item in features):
+              raise SystemExit("Unknown feature key")
+          if android in {"13", "14"} and any(item in {"cn_notification_fix", "disable_secure_flag"} for item in features):
+              raise SystemExit("Feature unavailable on this Android version")
+
+          normalized_files = {}
+          for key in fields:
+              item = telegram_files.get(key) or {}
+              file_id = str(item.get("file_id") or "") if isinstance(item, dict) else ""
+              if urls[key] and file_id:
+                  raise SystemExit(f"{key} was supplied twice")
+              if urls[key]:
+                  parsed = urlsplit(urls[key])
+                  host = (parsed.hostname or "").lower().rstrip(".")
+                  if parsed.scheme != "https" or host not in allowed_hosts or parsed.username or parsed.password:
+                      raise SystemExit(f"Untrusted URL for {key}")
+                  print(f"::add-mask::{urls[key]}")
+              if file_id:
+                  if not re.fullmatch(r"[A-Za-z0-9_-]{10,256}", file_id):
+                      raise SystemExit(f"Invalid Telegram file reference for {key}")
+                  print(f"::add-mask::{file_id}")
+              normalized_files[key] = file_id
+          if not any(urls.values()) and not any(normalized_files.values()):
+              raise SystemExit("At least one framework JAR is required")
+
+          builder_id = int(builder.get("telegram_user_id") or 0)
+          builder_slug = str(builder.get("slug") or "")
+          if builder_id <= 0 or not re.fullmatch(r"[a-z0-9_.-]{1,48}", builder_slug):
+              raise SystemExit("Invalid builder identity")
+
+          private = {
+              "request_id": request_id,
+              "android_version": android,
+              "api_level": {"13": "33", "14": "34", "15": "35", "16": "36"}[android],
+              "device_name": device,
+              "rom_version": rom_version,
+              "features": features,
+              "urls": urls,
+              "telegram_files": normalized_files,
+              "builder_id": builder_id,
+              "builder_slug": builder_slug,
+          }
+          path = Path(os.environ["RUNNER_TEMP"]) / f"deadzone-contract-{request_id}.json"
+          path.write_text(json.dumps(private, separators=(",", ":")), encoding="utf-8")
+          path.chmod(0o600)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              out.write(f"PRIVATE_CONTRACT_PATH={path}\n")
+              out.write(f"ANDROID_VERSION={android}\n")
+              out.write(f"DEVICE_NAME={device}\n")
+              out.write(f"BUILDER_ID={builder_id}\n")
+              out.write(f"BUILDER_SLUG={builder_slug}\n")
+          PY
+
+      - name: Validate private engine configuration
+        shell: bash
+        env:
+          FRAMEWORK_ENGINE_REPOSITORY: ${{ secrets.FRAMEWORK_ENGINE_REPOSITORY }}
+          FRAMEWORK_MODULE_REPOSITORY: ${{ secrets.FRAMEWORK_MODULE_REPOSITORY }}
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_TOKEN }}
+          RCLONE_CONFIG_BASE64: ${{ secrets.RCLONE_CONFIG_BASE64 }}
+          RCLONE_REMOTE_NAME: ${{ secrets.RCLONE_REMOTE_NAME }}
+        run: |
+          set -Eeuo pipefail
+          for key in FRAMEWORK_ENGINE_REPOSITORY FRAMEWORK_MODULE_REPOSITORY PRIVATE_REPO_TOKEN RCLONE_CONFIG_BASE64 RCLONE_REMOTE_NAME; do
+            [[ -n "${!key:-}" ]] || { echo "Missing required configuration: $key" >&2; exit 1; }
+          done
+
+      - name: Checkout private FrameworkPatcher engine
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ${{ secrets.FRAMEWORK_ENGINE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_TOKEN }}
+          ref: main
+          path: engine
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout private module template
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ${{ secrets.FRAMEWORK_MODULE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_TOKEN }}
+          ref: main
+          path: module-template
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Prepare engine configuration
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf engine/templates/framework-patcher-module
+          mkdir -p engine/templates
+          mv module-template engine/templates/framework-patcher-module
+          cp "$PRIVATE_CONTRACT_PATH" engine/build-config.json
+
+      - name: Set up Java 17
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install trusted build dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -m venv .venv
+          . .venv/bin/activate
+          python -m pip install "gdown==5.2.0"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq p7zip-full rclone
+
+      - name: Download active JAR inputs privately
+        working-directory: engine
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import subprocess
+          import urllib.parse
+          import urllib.request
+          import zipfile
+
+          names = {
+              "framework_url": "framework.jar",
+              "services_url": "services.jar",
+              "miui_services_url": "miui-services.jar",
+              "miui_framework_url": "miui-framework.jar",
+          }
+          config = json.load(open("build-config.json", encoding="utf-8"))
+
+          def stream_download(request, target, limit):
+              with urllib.request.urlopen(request, timeout=120) as response, target.open("wb") as output:
+                  total = 0
+                  while True:
+                      chunk = response.read(1024 * 1024)
+                      if not chunk:
+                          break
+                      total += len(chunk)
+                      if total > limit:
+                          raise SystemExit("Input JAR exceeds download limit")
+                      output.write(chunk)
+
+          def download_telegram(file_id, target):
+              token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+              if not token:
+                  raise SystemExit("Private Telegram input support is not configured")
+              query = urllib.parse.urlencode({"file_id": file_id})
+              metadata = urllib.request.Request(
+                  f"https://api.telegram.org/bot{token}/getFile?{query}",
+                  headers={"User-Agent": "DeadZone-Build/1.0"},
+              )
+              with urllib.request.urlopen(metadata, timeout=30) as response:
+                  result = __import__("json").load(response).get("result") or {}
+              file_path = result.get("file_path")
+              file_size = result.get("file_size")
+              if not isinstance(file_path, str) or ".." in file_path.split("/") or (isinstance(file_size, int) and file_size > 20_000_000):
+                  raise SystemExit("Invalid Telegram file metadata")
+              download = urllib.request.Request(
+                  f"https://api.telegram.org/file/bot{token}/{file_path}",
+                  headers={"User-Agent": "DeadZone-Build/1.0"},
+              )
+              stream_download(download, target, 20_000_000)
+
+          active = []
+          for key, target_name in names.items():
+              url = config["urls"].get(key, "")
+              file_id = config["telegram_files"].get(key, "")
+              if not url and not file_id:
+                  continue
+              target = pathlib.Path(target_name)
+              if file_id:
+                  download_telegram(file_id, target)
+              elif "drive.google.com" in url or "docs.google.com" in url:
+                  subprocess.run(["python3", "-m", "gdown", "--fuzzy", url, "-O", str(target)], check=True)
+              else:
+                  stream_download(urllib.request.Request(url, headers={"User-Agent": "DeadZone-Build/1.0"}), target, 1610612736)
+              if target.stat().st_size < 128 or not zipfile.is_zipfile(target):
+                  raise SystemExit(f"Invalid JAR: {target.name}")
+              active.append(key)
+          config["active_inputs"] = active
+          pathlib.Path("build-config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
+          PY
+
+      - name: Run hardened FrameworkPatcher engine
+        working-directory: engine
+        shell: bash
+        env:
+          DEADZONE_STRICT_PATCHES: '1'
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json
+          import subprocess
+          import sys
+
+          jar_flags = {
+              "framework_url": "--framework",
+              "services_url": "--services",
+              "miui_services_url": "--miui-services",
+              "miui_framework_url": "--miui-framework",
+          }
+          feature_flags = {
+              "disable_signature_verification": "--disable-signature-verification",
+              "cn_notification_fix": "--cn-notification-fix",
+              "disable_secure_flag": "--disable-secure-flag",
+              "kaorios_toolbox": "--kaorios-toolbox",
+              "add_gboard": "--add-gboard",
+          }
+          config = json.load(open("build-config.json", encoding="utf-8"))
+          args = [
+              "bash", "-e", "-u", "-o", "pipefail",
+              f"scripts/patcher_a{config['android_version']}.sh",
+              config["api_level"], config["device_name"], config["rom_version"],
+          ]
+          args.extend(jar_flags[name] for name in config["active_inputs"])
+          args.extend(feature_flags[name] for name in config["features"])
+          with open("deadzone-build.log", "w", encoding="utf-8") as log:
+              process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+              assert process.stdout is not None
+              for line in process.stdout:
+                  sys.stdout.write(line)
+                  log.write(line)
+              code = process.wait()
+          if code:
+              raise SystemExit(code)
+          PY
+
+      - name: Verify FrameworkPatcher output
+        working-directory: engine
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if grep -Eiq 'Strict patch contract failed|Critical Error|Method .+ not found|File not found' deadzone-build.log; then
+            echo "A requested patch target was not applied" >&2
+            exit 1
+          fi
+          python3 - <<'PY'
+          import glob
+          import hashlib
+          import json
+          import pathlib
+          import re
+          import zipfile
+
+          config = json.load(open("build-config.json", encoding="utf-8"))
+          jar_names = {
+              "framework_url": "framework.jar", "services_url": "services.jar",
+              "miui_services_url": "miui-services.jar", "miui_framework_url": "miui-framework.jar",
+          }
+          module_paths = {
+              "framework_url": "system/framework/framework.jar",
+              "services_url": "system/framework/services.jar",
+              "miui_services_url": "system/system_ext/framework/miui-services.jar",
+              "miui_framework_url": "system/system_ext/framework/miui-framework.jar",
+          }
+          outputs = glob.glob("Framework-Patcher-*.zip")
+          if len(outputs) != 1:
+              raise SystemExit("Expected exactly one output module")
+          archive = pathlib.Path(outputs[0])
+          if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.zip", archive.name) or archive.stat().st_size <= 0:
+              raise SystemExit("Unsafe or empty FrameworkPatcher output")
+          with zipfile.ZipFile(archive) as module:
+              names = set(module.namelist())
+              for key in config["active_inputs"]:
+                  path = module_paths[key]
+                  if path not in names:
+                      raise SystemExit(f"Module missing {path}")
+                  source_hash = hashlib.sha256(pathlib.Path(jar_names[key]).read_bytes()).hexdigest()
+                  result_hash = hashlib.sha256(module.read(path)).hexdigest()
+                  if source_hash == result_hash:
+                      raise SystemExit(f"{path} was packaged without a real change")
+              if "META-INF/build-manifest.json" not in names:
+                  raise SystemExit("Build manifest is missing")
+          pathlib.Path("artifact.env").write_text(
+              f"ARTIFACT={archive.name}\nSHA256={hashlib.sha256(archive.read_bytes()).hexdigest()}\nSIZE={archive.stat().st_size}\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload output privately to Google Drive
+        working-directory: engine
+        shell: bash
+        env:
+          RCLONE_CONFIG_BASE64: ${{ secrets.RCLONE_CONFIG_BASE64 }}
+          RCLONE_REMOTE_NAME: ${{ secrets.RCLONE_REMOTE_NAME }}
+          RCLONE_UPLOAD_DIR: ${{ secrets.RCLONE_UPLOAD_DIR }}
+        run: |
+          set -Eeuo pipefail
+          source artifact.env
+          config_path="$RUNNER_TEMP/deadzone-rclone-$REQUEST_ID.conf"
+          umask 077
+          printf '%s' "$RCLONE_CONFIG_BASE64" | base64 --decode > "$config_path"
+          chmod 600 "$config_path"
+          [[ "$RCLONE_REMOTE_NAME" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "Invalid Drive remote" >&2; exit 1; }
+          base_dir="${RCLONE_UPLOAD_DIR:-module}"
+          base_dir="${base_dir#/}"; base_dir="${base_dir%/}"
+          [[ -n "$base_dir" && "$base_dir" != *".."* ]] || { echo "Invalid upload root" >&2; exit 1; }
+          remote_path="${RCLONE_REMOTE_NAME}:${base_dir}/frameworkpatcher/${BUILDER_SLUG}_${BUILDER_ID}/${REQUEST_ID}/Android${ANDROID_VERSION}/${DEVICE_NAME}/${ARTIFACT}"
+          rclone --config "$config_path" copyto "$ARTIFACT" "$remote_path" --immutable --transfers 1
+          size_json="$(rclone --config "$config_path" size "$remote_path" --json)"
+          SIZE_JSON="$size_json" EXPECTED_SIZE="$SIZE" python3 - <<'PY'
+          import json, os
+          data = json.loads(os.environ["SIZE_JSON"])
+          if data.get("count") != 1 or data.get("bytes") != int(os.environ["EXPECTED_SIZE"]):
+              raise SystemExit("Remote size verification failed")
+          PY
+          link="$(rclone --config "$config_path" link "$remote_path")"
+          case "$link" in https://drive.google.com/*|https://docs.google.com/*) ;; *) echo "Invalid Drive link" >&2; exit 1 ;; esac
+          echo "::add-mask::$link"
+          {
+            echo "DRIVE_LINK=$link"
+            echo "ARTIFACT_NAME=$ARTIFACT"
+            echo "ARTIFACT_SHA256=$SHA256"
+            echo "ARTIFACT_SIZE=$SIZE"
+          } >> "$GITHUB_ENV"
+
+      - name: Create verified DeadZone result contract
+        working-directory: engine
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json, os
+          from datetime import datetime, timezone
+          from pathlib import Path
+          result = {
+              "schema_version": "1.0",
+              "request_id": os.environ["REQUEST_ID"],
+              "project": "frameworkpatcher",
+              "status": "success",
+              "provider": "google_drive",
+              "url": os.environ["DRIVE_LINK"],
+              "file_name": os.environ["ARTIFACT_NAME"],
+              "sha256": os.environ["ARTIFACT_SHA256"],
+              "size": int(os.environ["ARTIFACT_SIZE"]),
+              "completed_at": datetime.now(timezone.utc).isoformat(),
+          }
+          Path("../deadzone-result.json").write_text(json.dumps(result, sort_keys=True, indent=2), encoding="utf-8")
+          PY
+
+      - name: Expose only the verified result contract
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: deadzone-result-${{ inputs.request_id }}
+          path: deadzone-result.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload private diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: frameworkpatcher-diagnostics-${{ inputs.request_id }}
+          path: engine/deadzone-build.log
+          if-no-files-found: warn
+          retention-days: 3
+
+      - name: Remove temporary private data
+        if: always()
+        shell: bash
+        run: |
+          rm -f -- "$PRIVATE_CONTRACT_PATH" "$RUNNER_TEMP/deadzone-rclone-$REQUEST_ID.conf"
