@@ -5,77 +5,58 @@ on:
     branches: [main]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   migrate:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Checkout launcher
+      - name: Checkout launcher with migration credentials
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN }}
 
       - name: Migrate DeadZone production endpoint
-        id: migrate
-        continue-on-error: true
         shell: bash
         run: |
-          set -o pipefail
-          {
-            set -Eeuo pipefail
-            python3 - <<'PY'
-            from pathlib import Path
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
 
-            old_base = "https://deadzonebot.fly.dev"
-            new_base = "https://deadzone-mezo-v3-20260726.fly.dev"
+          old_base = "https://deadzonebot.fly.dev"
+          new_base = "https://deadzone-mezo-v3-20260726.fly.dev"
 
-            roots = [Path('.github/workflows'), Path('scripts')]
-            candidates = [Path('README.md')]
-            for root in roots:
-                if root.exists():
-                    candidates.extend(path for path in root.rglob('*') if path.is_file())
+          roots = [Path('.github/workflows'), Path('scripts')]
+          candidates = [Path('README.md')]
+          for root in roots:
+              if root.exists():
+                  candidates.extend(path for path in root.rglob('*') if path.is_file())
 
-            changed = []
-            migration = Path('.github/workflows/migrate-production-endpoint.yml')
-            for path in candidates:
-                if path == migration:
-                    continue
-                try:
-                    text = path.read_text(encoding='utf-8')
-                except UnicodeDecodeError:
-                    continue
-                updated = text.replace(old_base, new_base)
-                if updated != text:
-                    path.write_text(updated, encoding='utf-8')
-                    changed.append(str(path))
+          changed = []
+          migration = Path('.github/workflows/migrate-production-endpoint.yml')
+          for path in candidates:
+              if path == migration:
+                  continue
+              try:
+                  text = path.read_text(encoding='utf-8')
+              except UnicodeDecodeError:
+                  continue
+              updated = text.replace(old_base, new_base)
+              if updated != text:
+                  path.write_text(updated, encoding='utf-8')
+                  changed.append(str(path))
 
-            if migration.exists():
-                migration.unlink()
-            print('Migrated:', *changed, sep='\n- ')
-            PY
+          if migration.exists():
+              migration.unlink()
+          print('Migrated:', *changed, sep='\n- ')
+          PY
 
-            git config user.name 'DeadZone Production Migration'
-            git config user.email 'actions@users.noreply.github.com'
-            git add -A
-            git status --short
-            git diff --cached --check
-            git diff --cached --quiet && { echo 'No endpoint changes required.'; exit 0; }
-            git commit -m 'ops: switch launcher to DeadZone V3 production endpoint'
-            git push origin HEAD:main
-          } 2>&1 | tee migration-diagnostics.txt
-          exit "${PIPESTATUS[0]}"
-
-      - name: Upload migration diagnostics
-        if: steps.migrate.outcome != 'success'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: production-migration-diagnostics-${{ github.run_id }}
-          path: migration-diagnostics.txt
-          if-no-files-found: error
-          retention-days: 3
-
-      - name: Enforce migration success
-        if: steps.migrate.outcome != 'success'
-        run: exit 1
+          git config user.name 'DeadZone Production Migration'
+          git config user.email 'actions@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git diff --cached --quiet && { echo 'No endpoint changes required.'; exit 0; }
+          git commit -m 'ops: switch launcher to DeadZone V3 production endpoint'
+          git push origin HEAD:main
