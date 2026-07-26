@@ -234,6 +234,8 @@ jobs:
 
           if [[ "${DEADZONE_CONTROLLED_BUILD:-0}" == "1" ]]; then
             bash "$GITHUB_WORKSPACE/scripts/emit_stage.sh" packaging in_progress 4 "Packaging DeadZone Lite."
+          else
+            python3 notify.py pack DeadZone_Lite "$rom" mezo-lite "$BUILDER_NAME" "" || true
           fi
           sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash packROM.sh 2>&1 | tee pack_action.log
 
@@ -250,6 +252,8 @@ jobs:
 
           if [[ "${DEADZONE_CONTROLLED_BUILD:-0}" == "1" ]]; then
             bash "$GITHUB_WORKSPACE/scripts/emit_stage.sh" uploading in_progress 6 "Uploading DeadZone Lite."
+          else
+            python3 notify.py upload DeadZone_Lite "$rom" mezo-lite "$BUILDER_NAME" "" || true
           fi
           sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash uploadROM.sh 2>&1 | tee upload_action.log
 
@@ -292,6 +296,17 @@ jobs:
       - name: Live — Lite failed
         if: failure() && steps.mode.outputs.mode == 'bot'
         run: bash scripts/emit_stage.sh "${DZ_CURRENT_STAGE_KEY:-preparing}" failed "${DZ_COMPLETED_STAGES:-0}" "DeadZone Lite stopped safely."
+
+      - name: Manual — Lite verified
+        if: success() && steps.mode.outputs.mode == 'manual'
+        working-directory: engine
+        run: python3 notify.py success DeadZone_Lite "" mezo-lite "${BUILDER_NAME:-${GITHUB_ACTOR}}" ""
+
+      - name: Manual — Lite failed
+        if: failure() && steps.mode.outputs.mode == 'manual'
+        working-directory: engine
+        continue-on-error: true
+        run: python3 notify.py fail DeadZone_Lite "" mezo-lite "${BUILDER_NAME:-${GITHUB_ACTOR}}" ""
 
       - name: Publish manual release
         if: success() && steps.mode.outputs.mode == 'manual' && inputs.publish_release == 'true'
