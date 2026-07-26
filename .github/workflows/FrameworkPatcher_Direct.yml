@@ -64,7 +64,7 @@ jobs:
       ROM_VERSION: ${{ inputs.rom_version }}
       DEADZONE_FEATURES: ${{ inputs.features }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+      TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_RELEASE_GROUP_ID || secrets.TELEGRAM_CHANNEL_ID }}
       RCLONE_CONFIG_BASE64: ${{ secrets.RCLONE_CONFIG_BASE64 }}
       RCLONE_REMOTE_NAME: ${{ secrets.RCLONE_REMOTE_NAME }}
       RCLONE_UPLOAD_DIR: ${{ secrets.RCLONE_UPLOAD_DIR }}
