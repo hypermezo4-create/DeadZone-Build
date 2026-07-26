@@ -1,57 +1,114 @@
-name: "🔥 MEZO_Lite"
+name: "🔥 DeadZone Lite"
+
+run-name: "DeadZone Lite  ${{ inputs.request_id }}"
 
 on:
   workflow_dispatch:
     inputs:
-      rom_link:
-        description: "Direct ROM link for the DeadZone Lite build"
+      request_id:
+        description: "Opaque DeadZone control request ID"
         required: true
-      request_source:
-        description: "Request source label"
-        required: false
-        default: "github"
-      publish_release:
-        description: "Publish release automatically?"
-        required: false
-        default: "false"
-        type: choice
-        options:
-          - "false"
-          - "true"
+        type: string
+
+permissions:
+  contents: read
 
 concurrency:
-  group: mezo-lite-build-queue
+  group: deadzone-lite-build-queue
   cancel-in-progress: false
 
 jobs:
-  Initialize:
-    name: "🔥 Build MEZO Lite"
+  build:
+    name: "🔥 Build DeadZone Lite"
     runs-on: ubuntu-latest
+    timeout-minutes: 240
     env:
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHANNEL_ID: ${{ secrets.MEZO_PRIVATE_CHAT_ID }}
-      MEZO_PRIVATE_CHAT_ID: ${{ secrets.MEZO_PRIVATE_CHAT_ID }}
-      TELEGRAM_RELEASE_GROUP_ID: ${{ secrets.TELEGRAM_RELEASE_GROUP_ID }}
-      DEADZONE_EMOJI_PACK_NAME: ${{ secrets.DEADZONE_EMOJI_PACK_NAME }}
-      DEADZONE_PREMIUM_EMOJI_SETS: ${{ secrets.DEADZONE_PREMIUM_EMOJI_SETS }}
-      DEADZONE_CUSTOM_EMOJI_IDS_FILE: "config/deadzone-custom-emoji-ids.json"
-      MEZO_CONTACT_LINK: ${{ secrets.MEZO_CONTACT_LINK }}
-      UPDATES_GROUP_LINK: ${{ secrets.UPDATES_GROUP_LINK }}
-      SCREENSHOTS_GROUP_LINK: ${{ secrets.SCREENSHOTS_GROUP_LINK }}
-      CHAT_GROUP_LINK: ${{ secrets.CHAT_GROUP_LINK }}
-      CHANGELOG_LINK: ${{ secrets.CHANGELOG_LINK }}
-      SCREENSHOTS_POST_LINK: ${{ secrets.SCREENSHOTS_POST_LINK }}
-      RCLONE_CONFIG_BASE64: ${{ secrets.RCLONE_CONFIG_BASE64 }}
-      RCLONE_REMOTE_NAME: ${{ secrets.RCLONE_REMOTE_NAME }}
-      RCLONE_UPLOAD_DIR: ${{ secrets.RCLONE_UPLOAD_DIR }}
-      REQUEST_SOURCE: ${{ inputs.request_source }}
-      PUBLISH_RELEASE: ${{ inputs.publish_release }}
-      DEADZONE_NOTIFY_CONNECT_TIMEOUT: "3.5"
-      DEADZONE_NOTIFY_READ_TIMEOUT: "6"
+      REQUEST_ID: ${{ inputs.request_id }}
+      CONTROL_BOT_CONTRACT_URL: https://deadzonebot.fly.dev/contract/resolve
 
     steps:
+      - name: Validate public request ID
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ "$REQUEST_ID" =~ ^DZ-LT-[0-9]{8}-[0-9]{4}$ ]] || {
+            echo "Invalid DeadZone Lite request ID" >&2
+            exit 1
+          }
+
+      - name: Resolve private request contract
+        shell: bash
+        env:
+          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
+        run: |
+          set -Eeuo pipefail
+          [[ -n "${BUILD_PROGRESS_SECRET:-}" ]] || { echo "Missing BUILD_PROGRESS_SECRET" >&2; exit 1; }
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import hmac
+          import json
+          import os
+          import urllib.request
+          from datetime import datetime, timezone
+
+          secret = os.environ["BUILD_PROGRESS_SECRET"]
+          request_id = os.environ["REQUEST_ID"]
+          payload = {
+              "schema_version": "1.0",
+              "request_id": request_id,
+              "project": "lite",
+              "timestamp": datetime.now(timezone.utc).isoformat(),
+          }
+          body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+          signature = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+          req = urllib.request.Request(
+              os.environ["CONTROL_BOT_CONTRACT_URL"],
+              data=body,
+              method="POST",
+              headers={"Content-Type": "application/json", "X-DeadZone-Signature": signature},
+          )
+          with urllib.request.urlopen(req, timeout=20) as response:
+              response_body = response.read()
+              response_signature = response.headers.get("X-DeadZone-Signature", "")
+          expected = hmac.new(secret.encode(), response_body, hashlib.sha256).hexdigest()
+          if not hmac.compare_digest(expected, response_signature):
+              raise SystemExit("Invalid control-bot response signature")
+          contract = json.loads(response_body)
+          if contract.get("request_id") != request_id or contract.get("project") != "lite":
+              raise SystemExit("Private contract mismatch")
+          source_url = str(contract.get("source", {}).get("url") or "")
+          builder = contract.get("builder") or {}
+          builder_id = int(builder.get("telegram_user_id") or 0)
+          builder_slug = str(builder.get("slug") or "")
+          if not source_url.startswith("https://"):
+              raise SystemExit("Lite source URL is missing or invalid")
+          if builder_id <= 0 or not builder_slug:
+              raise SystemExit("Builder identity is missing")
+          print(f"::add-mask::{source_url}")
+          env_path = os.environ["GITHUB_ENV"]
+          with open(env_path, "a", encoding="utf-8") as out:
+              out.write("ROM_URL_B64=" + base64.b64encode(source_url.encode()).decode() + "\n")
+              out.write(f"BUILDER_ID={builder_id}\n")
+              out.write(f"BUILDER_SLUG={builder_slug}\n")
+          PY
+
+      - name: Validate private engine configuration
+        shell: bash
+        env:
+          LITE_ENGINE_REPOSITORY: ${{ secrets.LITE_ENGINE_REPOSITORY }}
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_TOKEN }}
+          RCLONE_CONFIG_BASE64: ${{ secrets.RCLONE_CONFIG_BASE64 }}
+          RCLONE_REMOTE_NAME: ${{ secrets.RCLONE_REMOTE_NAME }}
+          RCLONE_UPLOAD_DIR: ${{ secrets.RCLONE_UPLOAD_DIR }}
+        run: |
+          set -Eeuo pipefail
+          for key in LITE_ENGINE_REPOSITORY PRIVATE_REPO_TOKEN RCLONE_CONFIG_BASE64 RCLONE_REMOTE_NAME RCLONE_UPLOAD_DIR; do
+            [[ -n "${!key:-}" ]] || { echo "Missing required configuration: $key" >&2; exit 1; }
+          done
+
       - name: Maximize build space
-        uses: easimon/maximize-build-space@master
+        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
         with:
           swap-size-mb: 1024
           root-reserve-mb: 4096
@@ -60,45 +117,31 @@ jobs:
           remove-haskell: "true"
           remove-docker-images: "true"
 
-      - name: Clone private MEZO Lite source
-        uses: actions/checkout@v4
+      - name: Clone private DeadZone Lite engine
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          repository: hypermezo4-create/DeadZone_Lite
-          token: ${{ secrets.GH_TOKEN }}
+          repository: ${{ secrets.LITE_ENGINE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_TOKEN }}
           path: toolbuild
           fetch-depth: 1
           lfs: true
           ref: main
-
-      - name: Install notification dependencies
-        working-directory: toolbuild
-        run: python3 -c "import requests" 2>/dev/null || python3 -m pip install --user requests
-
-      - name: Send instant request notification
-        continue-on-error: true
-        working-directory: toolbuild
-        env:
-          DEADZONE_PREMIUM_EMOJI: "0"
-        run: timeout 8s python3 notify.py "start" "DeadZone_Lite" "${{ inputs.rom_link }}" "mezo-lite" || true
-
-      - name: Upgrade request notification to DeadZone Motion
-        continue-on-error: true
-        working-directory: toolbuild
-        run: timeout 20s python3 notify.py "start" "DeadZone_Lite" "${{ inputs.rom_link }}" "mezo-lite" || true
+          persist-credentials: false
 
       - name: Set timezone
         run: sudo timedatectl set-timezone Africa/Cairo
 
-      - name: Set up Java
-        uses: actions/setup-java@v4
+      - name: Set up Java 17
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00
         with:
-          distribution: "temurin"
-          java-version: "17"
+          distribution: temurin
+          java-version: '17'
 
-      - name: Install dependencies
+      - name: Install Lite build dependencies
         working-directory: toolbuild
+        shell: bash
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             aria2 jq sshpass python-is-python3 wget python3-pip lz4 xz-utils \
@@ -111,36 +154,20 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends rclone || curl -fsSL https://rclone.org/install.sh | sudo bash
           python3 -m pip install --user ConfigObj setuptools "gdown==5.2.0"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      - name: Grant required file permissions
-        working-directory: toolbuild
-        run: |
           chmod +x build.sh packROM.sh uploadROM.sh
           find bin -type f -name '*.sh' -exec chmod +x {} +
           chmod +x bin/Linux/x86_64/*
-
-      - name: Verify bundled payload extractor
-        working-directory: toolbuild
-        run: |
-          test -x bin/Linux/x86_64/payload-extract
-          bin/Linux/x86_64/payload-extract --help >/dev/null 2>&1 || true
-
-      - name: Verify super image tools
-        working-directory: toolbuild
-        run: |
-          set -euo pipefail
-          test -x /usr/bin/simg2img
-          test -f bin/supermeta.py
-          python3 bin/supermeta.py --help >/dev/null
           bash -n build.sh
           bash -n packROM.sh
+          bash -n uploadROM.sh
 
       - name: Support custom ROM filenames
         working-directory: toolbuild
+        shell: bash
         run: |
+          set -Eeuo pipefail
           python3 - <<'PY'
           from pathlib import Path
-
           path = Path("bin/ddevice/getROM.sh")
           text = path.read_text(encoding="utf-8")
           old = '''else
@@ -165,99 +192,105 @@ jobs:
 
       - name: Build ROM
         working-directory: toolbuild
-        env:
-          INPUT_URL: ${{ inputs.rom_link }}
+        shell: bash
         run: |
-          set -e
-          set -o pipefail
-          echo "CURRENT_STAGE=parse_rom_metadata" >> "$GITHUB_ENV"
-          sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash build.sh "$INPUT_URL" 2>&1 | tee build_action.log
+          set -Eeuo pipefail
+          input_url="$(printf '%s' "$ROM_URL_B64" | base64 --decode)"
+          sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \
+            bash build.sh "$input_url" 2>&1 | tee build_action.log
 
       - name: Upload build diagnostics
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: deadzone-lite-build-diagnostics
+          name: deadzone-lite-diagnostics-${{ inputs.request_id }}
           path: |
             toolbuild/build_action.log
             toolbuild/build/baserom/super_merge_diagnostics.txt
             toolbuild/build/baserom/super_info.json
           if-no-files-found: warn
-          retention-days: 7
-
-      - name: Send packaging notification
-        continue-on-error: true
-        working-directory: toolbuild
-        run: timeout 8s python3 notify.py "pack" "DeadZone_Lite" "${{ inputs.rom_link }}" "mezo-lite" || true
+          retention-days: 3
 
       - name: Pack ROM
         working-directory: toolbuild
+        shell: bash
         run: |
-          set -e
-          set -o pipefail
-          echo "CURRENT_STAGE=package" >> "$GITHUB_ENV"
-          sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash packROM.sh 2>&1 | tee pack_action.log
+          set -Eeuo pipefail
+          sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \
+            bash packROM.sh 2>&1 | tee pack_action.log
 
       - name: Upload pack diagnostics
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: deadzone-lite-pack-diagnostics
+          name: deadzone-lite-pack-diagnostics-${{ inputs.request_id }}
           path: |
             toolbuild/pack_action.log
             toolbuild/build/pack_diagnostics
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 3
 
-      - name: Set up Rclone
+      - name: Upload privately to Google Drive
         working-directory: toolbuild
-        run: |
-          set -e
-          set -o pipefail
-          echo "CURRENT_STAGE=setup_rclone" >> "$GITHUB_ENV"
-          sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash uploadROM.sh setup
-
-      - name: Send upload notification
-        continue-on-error: true
-        working-directory: toolbuild
-        run: timeout 8s python3 notify.py "upload" "DeadZone_Lite" "${{ inputs.rom_link }}" "mezo-lite" || true
-
-      - name: Upload ROM to Google Drive
-        working-directory: toolbuild
-        run: |
-          set -e
-          set -o pipefail
-          echo "CURRENT_STAGE=upload_drive" >> "$GITHUB_ENV"
-          sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash uploadROM.sh
-
-      - name: Send success notification
-        if: success()
-        continue-on-error: true
-        working-directory: toolbuild
-        run: timeout 8s python3 notify.py "success" "DeadZone_Lite" "${{ inputs.rom_link }}" "mezo-lite" || true
-
-      - name: Publish release notification
-        if: success() && (startsWith(inputs.request_source, 'telegram') || inputs.publish_release == 'true')
-        continue-on-error: true
-        working-directory: toolbuild
+        shell: bash
         env:
-          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_RELEASE_GROUP_ID }}
-        run: timeout 12s python3 notify.py "success" "DeadZone_Lite" "${{ inputs.rom_link }}" "mezo-lite" || true
+          RCLONE_CONFIG_BASE64: ${{ secrets.RCLONE_CONFIG_BASE64 }}
+          RCLONE_REMOTE_NAME: ${{ secrets.RCLONE_REMOTE_NAME }}
+          RCLONE_UPLOAD_DIR: ${{ secrets.RCLONE_UPLOAD_DIR }}
+        run: |
+          set -Eeuo pipefail
+          base_dir="${RCLONE_UPLOAD_DIR%/}"
+          export RCLONE_UPLOAD_DIR="${base_dir}/lite/${BUILDER_SLUG}_${BUILDER_ID}/${REQUEST_ID}"
+          bash uploadROM.sh setup
+          bash uploadROM.sh
 
-      - name: Request manual publish decision
-        if: success() && !startsWith(inputs.request_source, 'telegram') && inputs.publish_release != 'true'
-        continue-on-error: true
+      - name: Create verified DeadZone result contract
         working-directory: toolbuild
-        run: timeout 8s python3 notify.py "success" "DeadZone_Lite" "${{ inputs.rom_link }}" "mezo-lite" || true
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+          from urllib.parse import urlsplit
 
-      - name: Send failure notification
-        if: failure()
-        continue-on-error: true
-        working-directory: toolbuild
-        run: timeout 8s python3 notify.py "fail" "DeadZone_Lite" "${{ inputs.rom_link }}" "mezo-lite" || true
+          request_id = os.environ["REQUEST_ID"]
+          file_name = Path("bin/ddevice/output_zip.txt").read_text(encoding="utf-8").strip()
+          drive_link = Path("bin/ddevice/drive_link.txt").read_text(encoding="utf-8").strip()
+          artifact = Path("out") / file_name
+          if not artifact.is_file() or artifact.stat().st_size <= 0:
+              raise SystemExit("Lite output archive is missing")
+          parsed = urlsplit(drive_link)
+          if parsed.scheme != "https" or parsed.hostname not in {"drive.google.com", "docs.google.com"}:
+              raise SystemExit("Lite delivery link is invalid")
+          result = {
+              "schema_version": "1.0",
+              "request_id": request_id,
+              "project": "lite",
+              "status": "success",
+              "provider": "google_drive",
+              "url": drive_link,
+              "file_name": file_name,
+              "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+              "size": artifact.stat().st_size,
+              "completed_at": datetime.now(timezone.utc).isoformat(),
+          }
+          Path("../deadzone-result.json").write_text(json.dumps(result, sort_keys=True, indent=2), encoding="utf-8")
+          PY
 
-      - name: Send cancellation notification
-        if: cancelled()
-        continue-on-error: true
+      - name: Expose only the verified result contract
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: deadzone-result-${{ inputs.request_id }}
+          path: deadzone-result.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Remove temporary credentials
+        if: always()
         working-directory: toolbuild
-        run: timeout 8s python3 notify.py "cancelled" "DeadZone_Lite" "${{ inputs.rom_link }}" "mezo-lite" || true
+        shell: bash
+        run: rm -f -- rclone.conf
