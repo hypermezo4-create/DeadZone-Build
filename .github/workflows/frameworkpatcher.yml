@@ -25,8 +25,16 @@ jobs:
     env:
       REQUEST_ID: ${{ inputs.request_id }}
       CONTROL_BOT_CONTRACT_URL: https://deadzonebot.fly.dev/contract/resolve
+      CONTROL_BOT_TELEMETRY_URL: https://deadzonebot.fly.dev/telemetry
+      DEADZONE_CONTROLLED_BUILD: "1"
 
     steps:
+      - name: Checkout DeadZone launcher
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
       - name: Validate public request ID
         shell: bash
         run: |
@@ -35,6 +43,13 @@ jobs:
             echo "Invalid FrameworkPatcher request ID" >&2
             exit 1
           }
+          echo "BUILD_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+
+      - name: Telemetry — prepare FrameworkPatcher
+        shell: bash
+        env:
+          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
+        run: bash scripts/emit_stage.sh preparing in_progress 0 "Analyzing the FrameworkPatcher request and selected patch profile."
 
       - name: Resolve private request contract
         shell: bash
@@ -75,7 +90,7 @@ jobs:
               response_signature = response.headers.get("X-DeadZone-Signature", "")
           expected = hmac.new(secret.encode(), response_body, hashlib.sha256).hexdigest()
           if not hmac.compare_digest(expected, response_signature):
-              raise SystemExit("Invalid control-bot response signature")
+              raise SystemExit("Invalid control response signature")
           contract = json.loads(response_body)
           if contract.get("request_id") != request_id or contract.get("project") != "frameworkpatcher":
               raise SystemExit("Private contract mismatch")
@@ -135,6 +150,7 @@ jobs:
 
           builder_id = int(builder.get("telegram_user_id") or 0)
           builder_slug = str(builder.get("slug") or "")
+          builder_name = str(builder.get("display_name") or builder.get("username") or builder_slug or "DeadZone Builder")
           if builder_id <= 0 or not re.fullmatch(r"[a-z0-9_.-]{1,48}", builder_slug):
               raise SystemExit("Invalid builder identity")
 
@@ -149,6 +165,7 @@ jobs:
               "telegram_files": normalized_files,
               "builder_id": builder_id,
               "builder_slug": builder_slug,
+              "builder_name": builder_name,
           }
           path = Path(os.environ["RUNNER_TEMP"]) / f"deadzone-contract-{request_id}.json"
           path.write_text(json.dumps(private, separators=(",", ":")), encoding="utf-8")
@@ -159,6 +176,7 @@ jobs:
               out.write(f"DEVICE_NAME={device}\n")
               out.write(f"BUILDER_ID={builder_id}\n")
               out.write(f"BUILDER_SLUG={builder_slug}\n")
+              out.write("DEADZONE_FEATURES=" + ",".join(features) + "\n")
           PY
 
       - name: Validate private engine configuration
@@ -174,6 +192,12 @@ jobs:
           for key in FRAMEWORK_ENGINE_REPOSITORY FRAMEWORK_MODULE_REPOSITORY PRIVATE_REPO_TOKEN RCLONE_CONFIG_BASE64 RCLONE_REMOTE_NAME; do
             [[ -n "${!key:-}" ]] || { echo "Missing required configuration: $key" >&2; exit 1; }
           done
+
+      - name: Telemetry — load Framework engine
+        shell: bash
+        env:
+          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
+        run: bash scripts/emit_stage.sh loading_engine in_progress 1 "Loading the private patch engine and DeadZone module template."
 
       - name: Checkout private FrameworkPatcher engine
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -203,12 +227,20 @@ jobs:
           mkdir -p engine/templates
           mv module-template engine/templates/framework-patcher-module
           cp "$PRIVATE_CONTRACT_PATH" engine/build-config.json
+          python3 -m py_compile engine/notify.py
+          test -s engine/Version
 
       - name: Set up Java 17
         uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00
         with:
           distribution: temurin
           java-version: '17'
+
+      - name: Telemetry — prepare Framework tools
+        shell: bash
+        env:
+          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
+        run: bash scripts/emit_stage.sh installing_tools in_progress 2 "Preparing Java and JAR processing tools for FrameworkPatcher."
 
       - name: Install trusted build dependencies
         shell: bash
@@ -264,17 +296,17 @@ jobs:
               query = urllib.parse.urlencode({"file_id": file_id})
               metadata = urllib.request.Request(
                   f"https://api.telegram.org/bot{token}/getFile?{query}",
-                  headers={"User-Agent": "DeadZone-Build/1.0"},
+                  headers={"User-Agent": "DeadZone-System/1.0"},
               )
               with urllib.request.urlopen(metadata, timeout=30) as response:
-                  result = __import__("json").load(response).get("result") or {}
+                  result = json.load(response).get("result") or {}
               file_path = result.get("file_path")
               file_size = result.get("file_size")
               if not isinstance(file_path, str) or ".." in file_path.split("/") or (isinstance(file_size, int) and file_size > 20_000_000):
                   raise SystemExit("Invalid Telegram file metadata")
               download = urllib.request.Request(
                   f"https://api.telegram.org/file/bot{token}/{file_path}",
-                  headers={"User-Agent": "DeadZone-Build/1.0"},
+                  headers={"User-Agent": "DeadZone-System/1.0"},
               )
               stream_download(download, target, 20_000_000)
 
@@ -290,13 +322,19 @@ jobs:
               elif "drive.google.com" in url or "docs.google.com" in url:
                   subprocess.run(["python3", "-m", "gdown", "--fuzzy", url, "-O", str(target)], check=True)
               else:
-                  stream_download(urllib.request.Request(url, headers={"User-Agent": "DeadZone-Build/1.0"}), target, 1610612736)
+                  stream_download(urllib.request.Request(url, headers={"User-Agent": "DeadZone-System/1.0"}), target, 1610612736)
               if target.stat().st_size < 128 or not zipfile.is_zipfile(target):
                   raise SystemExit(f"Invalid JAR: {target.name}")
               active.append(key)
           config["active_inputs"] = active
           pathlib.Path("build-config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
           PY
+
+      - name: Telemetry — apply Framework patches
+        shell: bash
+        env:
+          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
+        run: bash scripts/emit_stage.sh building in_progress 3 "Decompiling JARs and applying the requested FrameworkPatcher modifications."
 
       - name: Run hardened FrameworkPatcher engine
         working-directory: engine
@@ -342,6 +380,12 @@ jobs:
           if code:
               raise SystemExit(code)
           PY
+
+      - name: Telemetry — build Framework module
+        shell: bash
+        env:
+          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
+        run: bash scripts/emit_stage.sh packaging in_progress 4 "Rebuilding patched JARs and assembling the FrameworkPatcher module."
 
       - name: Verify FrameworkPatcher output
         working-directory: engine
@@ -395,6 +439,26 @@ jobs:
           )
           PY
 
+      - name: Telemetry — verify Framework module
+        shell: bash
+        env:
+          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
+        run: bash scripts/emit_stage.sh preparing_upload in_progress 5 "Verifying module contents, changed JARs and package integrity."
+
+      - name: Prepare verified artifact metadata
+        working-directory: engine
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source artifact.env
+          echo "DEADZONE_ARTIFACT_SIZE=$SIZE" >> "$GITHUB_ENV"
+
+      - name: Telemetry — deliver Framework module
+        shell: bash
+        env:
+          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
+        run: bash scripts/emit_stage.sh uploading in_progress 6 "Delivering the verified FrameworkPatcher module to DeadZone Cloud."
+
       - name: Upload output privately to Google Drive
         working-directory: engine
         shell: bash
@@ -432,6 +496,12 @@ jobs:
             echo "ARTIFACT_SIZE=$SIZE"
           } >> "$GITHUB_ENV"
 
+      - name: Telemetry — finalize FrameworkPatcher
+        shell: bash
+        env:
+          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
+        run: bash scripts/emit_stage.sh finalizing in_progress 7 "Final integrity verification for the patched Framework module."
+
       - name: Create verified DeadZone result contract
         working-directory: engine
         shell: bash
@@ -449,7 +519,7 @@ jobs:
               "provider": "google_drive",
               "url": os.environ["DRIVE_LINK"],
               "file_name": os.environ["ARTIFACT_NAME"],
-              "sha256": os.environ["ARTIFACT_SHA256"],
+              "sha256": os.environ["ARTIFACT_SHA256"].lower(),
               "size": int(os.environ["ARTIFACT_SIZE"]),
               "completed_at": datetime.now(timezone.utc).isoformat(),
           }
@@ -464,7 +534,33 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-      - name: Upload private diagnostics on failure
+      - name: Telemetry — FrameworkPatcher verified
+        if: success()
+        shell: bash
+        env:
+          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
+        run: |
+          python3 scripts/send_telemetry.py \
+            --request-id "$REQUEST_ID" --stage-key finalizing --stage-state success \
+            --completed-stages 8 --total-stages 8 \
+            --build-started-at "$BUILD_STARTED_AT" --stage-started-at "${DZ_STAGE_STARTED_AT:-}" \
+            --artifact-size "${DEADZONE_ARTIFACT_SIZE:-}" --message "FrameworkPatcher completed and passed final module verification." || true
+
+      - name: Telemetry — FrameworkPatcher failed
+        if: failure()
+        shell: bash
+        env:
+          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
+        run: bash scripts/emit_stage.sh "${DZ_CURRENT_STAGE_KEY:-preparing}" failed "${DZ_COMPLETED_STAGES:-0}" "FrameworkPatcher stopped safely after a failed patch or verification step."
+
+      - name: Telemetry — FrameworkPatcher cancelled
+        if: cancelled()
+        shell: bash
+        env:
+          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
+        run: bash scripts/emit_stage.sh "${DZ_CURRENT_STAGE_KEY:-preparing}" cancelled "${DZ_COMPLETED_STAGES:-0}" "FrameworkPatcher was cancelled safely."
+
+      - name: Upload private diagnostics
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -473,8 +569,8 @@ jobs:
           if-no-files-found: warn
           retention-days: 3
 
-      - name: Remove temporary private data
+      - name: Remove temporary credentials
         if: always()
         shell: bash
         run: |
-          rm -f -- "$PRIVATE_CONTRACT_PATH" "$RUNNER_TEMP/deadzone-rclone-$REQUEST_ID.conf"
+          rm -f -- "$RUNNER_TEMP/deadzone-rclone-$REQUEST_ID.conf" "$RUNNER_TEMP/deadzone-contract-$REQUEST_ID.json"
