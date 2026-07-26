@@ -17,6 +17,12 @@ on:
         description: "Optional builder label for manual build."
         required: false
         type: string
+      language:
+        description: "Live build language for manual GitHub build."
+        required: false
+        default: "en"
+        type: choice
+        options: ["en", "ar"]
       publish_release:
         description: "Publish release message after manual build?"
         required: false
@@ -56,6 +62,7 @@ jobs:
       RCLONE_CONFIG_BASE64: ${{ secrets.RCLONE_CONFIG_BASE64 }}
       RCLONE_REMOTE_NAME: ${{ secrets.RCLONE_REMOTE_NAME }}
       RCLONE_UPLOAD_DIR: ${{ secrets.RCLONE_UPLOAD_DIR }}
+      RCLONE_PUBLIC_LINK_BASE: ${{ secrets.RCLONE_PUBLIC_LINK_BASE }}
 
     steps:
       - name: Checkout launcher
@@ -71,6 +78,7 @@ jobs:
           INPUT_REQUEST_ID: ${{ inputs.request_id }}
           INPUT_ROM_LINK: ${{ inputs.rom_link }}
           INPUT_BUILDER_LABEL: ${{ inputs.builder_label }}
+          INPUT_LANGUAGE: ${{ inputs.language }}
         run: |
           set -Eeuo pipefail
           if [[ -n "${INPUT_REQUEST_ID:-}" ]]; then
@@ -80,6 +88,7 @@ jobs:
             python3 - <<'PY'
           import base64, hashlib, hmac, json, os, re, urllib.request
           from datetime import datetime, timezone
+
           secret = os.environ["BUILD_PROGRESS_SECRET"]
           request_id = os.environ["REQUEST_ID"]
           payload = {"schema_version":"1.0","request_id":request_id,"project":"lite","timestamp":datetime.now(timezone.utc).isoformat()}
@@ -93,19 +102,30 @@ jobs:
           if not hmac.compare_digest(expected, response_signature): raise SystemExit("Invalid control response signature")
           contract = json.loads(response_body)
           if contract.get("request_id") != request_id or contract.get("project") != "lite": raise SystemExit("Private contract mismatch")
+
           source_url = str((contract.get("source") or {}).get("url") or "")
           builder = contract.get("builder") or {}
+          live = contract.get("live_message") or {}
           builder_id = int(builder.get("telegram_user_id") or 0)
           builder_slug = str(builder.get("slug") or "")
           builder_name = str(builder.get("display_name") or builder.get("username") or builder_slug or "DeadZone Builder")
+          language = "ar" if str(contract.get("language") or "").lower() == "ar" else "en"
+          status_chat_id = int(live.get("chat_id") or 0)
+          status_message_id = int(live.get("message_id") or 0)
+
           if not source_url.startswith("https://"): raise SystemExit("Lite source URL is missing or invalid")
           if builder_id <= 0 or not re.fullmatch(r"[a-z0-9_.-]{1,48}", builder_slug): raise SystemExit("Builder identity is invalid")
+          if status_chat_id == 0 or status_message_id <= 0: raise SystemExit("Lite live-message contract is missing")
+
           print(f"::add-mask::{source_url}")
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
               out.write(f"REQUEST_ID={request_id}\n")
               out.write("ROM_URL_B64=" + base64.b64encode(source_url.encode()).decode() + "\n")
               out.write(f"BUILDER_ID={builder_id}\nBUILDER_SLUG={builder_slug}\n")
               out.write("BUILDER_NAME_B64=" + base64.b64encode(builder_name.encode()).decode() + "\n")
+              out.write(f"DEADZONE_LANGUAGE={language}\n")
+              out.write(f"TELEGRAM_MSG_CHAT_ID={status_chat_id}\n")
+              out.write(f"TELEGRAM_MSG_ID={status_message_id}\n")
               out.write("REQUEST_SOURCE=telegram\nDEADZONE_CONTROLLED_BUILD=1\n")
           PY
             echo "mode=bot" >> "$GITHUB_OUTPUT"
@@ -113,6 +133,8 @@ jobs:
             [[ "${INPUT_ROM_LINK:-}" == https://* ]] || { echo "Manual GitHub build requires an HTTPS rom_link" >&2; exit 1; }
             echo "::add-mask::$INPUT_ROM_LINK"
             builder="${INPUT_BUILDER_LABEL:-${GITHUB_ACTOR}}"
+            language="${INPUT_LANGUAGE:-en}"
+            [[ "$language" == "ar" ]] || language="en"
             echo "ROM_URL_B64=$(printf '%s' "$INPUT_ROM_LINK" | base64 -w0)" >> "$GITHUB_ENV"
             echo "BUILDER_NAME_B64=$(printf '%s' "$builder" | base64 -w0)" >> "$GITHUB_ENV"
             {
@@ -121,6 +143,7 @@ jobs:
               echo "BUILDER_SLUG=github"
               echo "REQUEST_SOURCE=github"
               echo "DEADZONE_CONTROLLED_BUILD=0"
+              echo "DEADZONE_LANGUAGE=$language"
             } >> "$GITHUB_ENV"
             echo "mode=manual" >> "$GITHUB_OUTPUT"
           fi
@@ -202,6 +225,7 @@ jobs:
           set -Eeuo pipefail
           rom="$(printf '%s' "$ROM_URL_B64" | base64 --decode)"
           export BUILDER_NAME="$(printf '%s' "$BUILDER_NAME_B64" | base64 --decode)"
+          export INPUT_URL="$rom"
 
           if [[ "${DEADZONE_CONTROLLED_BUILD:-0}" == "1" ]]; then
             bash "$GITHUB_WORKSPACE/scripts/emit_stage.sh" building in_progress 3 "Building DeadZone Lite."
@@ -268,6 +292,12 @@ jobs:
       - name: Live — Lite failed
         if: failure() && steps.mode.outputs.mode == 'bot'
         run: bash scripts/emit_stage.sh "${DZ_CURRENT_STAGE_KEY:-preparing}" failed "${DZ_COMPLETED_STAGES:-0}" "DeadZone Lite stopped safely."
+
+      - name: Publish manual release
+        if: success() && steps.mode.outputs.mode == 'manual' && inputs.publish_release == 'true'
+        working-directory: engine
+        continue-on-error: true
+        run: python3 notify.py release success
 
       - name: Expose verified result
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
