@@ -31,8 +31,16 @@ jobs:
     env:
       REQUEST_ID: ${{ inputs.request_id }}
       CONTROL_BOT_CONTRACT_URL: https://deadzonebot.fly.dev/contract/resolve
+      CONTROL_BOT_TELEMETRY_URL: https://deadzonebot.fly.dev/telemetry
+      DEADZONE_CONTROLLED_BUILD: "1"
 
     steps:
+      - name: Checkout DeadZone launcher
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
       - name: Validate public request ID
         shell: bash
         run: |
@@ -41,6 +49,13 @@ jobs:
             echo "Invalid DeadZone Lite request ID" >&2
             exit 1
           }
+          echo "BUILD_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+
+      - name: Telemetry — prepare Lite
+        shell: bash
+        env:
+          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
+        run: bash scripts/emit_stage.sh preparing in_progress 0 "Preparing the DeadZone Lite build profile."
 
       - name: Resolve private request contract
         shell: bash
@@ -55,6 +70,7 @@ jobs:
           import hmac
           import json
           import os
+          import re
           import urllib.request
           from datetime import datetime, timezone
 
@@ -79,7 +95,7 @@ jobs:
               response_signature = response.headers.get("X-DeadZone-Signature", "")
           expected = hmac.new(secret.encode(), response_body, hashlib.sha256).hexdigest()
           if not hmac.compare_digest(expected, response_signature):
-              raise SystemExit("Invalid control-bot response signature")
+              raise SystemExit("Invalid control response signature")
           contract = json.loads(response_body)
           if contract.get("request_id") != request_id or contract.get("project") != "lite":
               raise SystemExit("Private contract mismatch")
@@ -87,16 +103,17 @@ jobs:
           builder = contract.get("builder") or {}
           builder_id = int(builder.get("telegram_user_id") or 0)
           builder_slug = str(builder.get("slug") or "")
+          builder_name = str(builder.get("display_name") or builder.get("username") or builder_slug or "DeadZone Builder")
           if not source_url.startswith("https://"):
               raise SystemExit("Lite source URL is missing or invalid")
-          if builder_id <= 0 or not builder_slug:
-              raise SystemExit("Builder identity is missing")
+          if builder_id <= 0 or not re.fullmatch(r"[a-z0-9_.-]{1,48}", builder_slug):
+              raise SystemExit("Builder identity is invalid")
           print(f"::add-mask::{source_url}")
-          env_path = os.environ["GITHUB_ENV"]
-          with open(env_path, "a", encoding="utf-8") as out:
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
               out.write("ROM_URL_B64=" + base64.b64encode(source_url.encode()).decode() + "\n")
               out.write(f"BUILDER_ID={builder_id}\n")
               out.write(f"BUILDER_SLUG={builder_slug}\n")
+              out.write("BUILDER_NAME_B64=" + base64.b64encode(builder_name.encode()).decode() + "\n")
           PY
 
       - name: Validate private engine configuration
@@ -123,6 +140,12 @@ jobs:
           remove-haskell: "true"
           remove-docker-images: "true"
 
+      - name: Telemetry — load Lite engine
+        shell: bash
+        env:
+          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
+        run: bash scripts/emit_stage.sh loading_engine in_progress 1 "Loading the private DeadZone Lite engine."
+
       - name: Clone private DeadZone Lite engine
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -135,13 +158,19 @@ jobs:
           persist-credentials: false
 
       - name: Set timezone
-        run: sudo timedatedctl set-timezone Africa/Cairo || sudo timedatectl set-timezone Africa/Cairo
+        run: sudo timedatectl set-timezone Africa/Cairo
 
       - name: Set up Java 17
         uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00
         with:
           distribution: temurin
           java-version: '17'
+
+      - name: Telemetry — prepare Lite tools
+        shell: bash
+        env:
+          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
+        run: bash scripts/emit_stage.sh installing_tools in_progress 2 "Preparing Lite extraction and build tools."
 
       - name: Install Lite build dependencies
         working-directory: toolbuild
@@ -196,6 +225,12 @@ jobs:
           PY
           bash -n bin/ddevice/getROM.sh
 
+      - name: Telemetry — build Lite
+        shell: bash
+        env:
+          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
+        run: bash scripts/emit_stage.sh building in_progress 3 "Extracting the ROM and applying DeadZone Lite modifications."
+
       - name: Build ROM
         working-directory: toolbuild
         shell: bash
@@ -217,6 +252,12 @@ jobs:
           if-no-files-found: warn
           retention-days: 3
 
+      - name: Telemetry — package Lite
+        shell: bash
+        env:
+          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
+        run: bash scripts/emit_stage.sh packaging in_progress 4 "Rebuilding partitions and packaging DeadZone Lite."
+
       - name: Pack ROM
         working-directory: toolbuild
         shell: bash
@@ -236,6 +277,29 @@ jobs:
           if-no-files-found: warn
           retention-days: 3
 
+      - name: Telemetry — verify Lite package
+        shell: bash
+        env:
+          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
+        run: bash scripts/emit_stage.sh preparing_upload in_progress 5 "Verifying the Lite package before delivery."
+
+      - name: Verify package metadata
+        working-directory: toolbuild
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -s bin/ddevice/output_zip.txt
+          output="$(cat bin/ddevice/output_zip.txt)"
+          test -s "out/$output"
+          size="$(stat -c '%s' "out/$output")"
+          echo "DEADZONE_ARTIFACT_SIZE=$size" >> "$GITHUB_ENV"
+
+      - name: Telemetry — deliver Lite
+        shell: bash
+        env:
+          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
+        run: bash scripts/emit_stage.sh uploading in_progress 6 "Delivering the verified Lite package to DeadZone Cloud."
+
       - name: Upload privately to Google Drive
         working-directory: toolbuild
         shell: bash
@@ -249,6 +313,12 @@ jobs:
           export RCLONE_UPLOAD_DIR="${base_dir}/lite/${BUILDER_SLUG}_${BUILDER_ID}/${REQUEST_ID}"
           bash uploadROM.sh setup
           bash uploadROM.sh
+
+      - name: Telemetry — finalize Lite
+        shell: bash
+        env:
+          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
+        run: bash scripts/emit_stage.sh finalizing in_progress 7 "Final integrity verification for DeadZone Lite."
 
       - name: Create verified DeadZone result contract
         working-directory: toolbuild
@@ -294,6 +364,32 @@ jobs:
           path: deadzone-result.json
           if-no-files-found: error
           retention-days: 1
+
+      - name: Telemetry — Lite verified
+        if: success()
+        shell: bash
+        env:
+          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
+        run: |
+          python3 scripts/send_telemetry.py \
+            --request-id "$REQUEST_ID" --stage-key finalizing --stage-state success \
+            --completed-stages 8 --total-stages 8 \
+            --build-started-at "$BUILD_STARTED_AT" --stage-started-at "${DZ_STAGE_STARTED_AT:-}" \
+            --artifact-size "${DEADZONE_ARTIFACT_SIZE:-}" --message "DeadZone Lite completed and passed final verification." || true
+
+      - name: Telemetry — Lite failed
+        if: failure()
+        shell: bash
+        env:
+          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
+        run: bash scripts/emit_stage.sh "${DZ_CURRENT_STAGE_KEY:-preparing}" failed "${DZ_COMPLETED_STAGES:-0}" "DeadZone Lite stopped safely after a failed build or verification step."
+
+      - name: Telemetry — Lite cancelled
+        if: cancelled()
+        shell: bash
+        env:
+          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
+        run: bash scripts/emit_stage.sh "${DZ_CURRENT_STAGE_KEY:-preparing}" cancelled "${DZ_COMPLETED_STAGES:-0}" "DeadZone Lite was cancelled safely."
 
       - name: Remove temporary credentials
         if: always()
