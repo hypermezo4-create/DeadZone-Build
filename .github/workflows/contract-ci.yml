@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: read
+  statuses: write
 
 jobs:
   validate:
@@ -71,6 +72,9 @@ jobs:
           grep -q 'LITE_ENGINE_REPOSITORY' .github/workflows/Lite_Test.yml
           grep -q 'GAMINGPLUS_ENGINE_REPOSITORY' .github/workflows/GamingPlus_Direct.yml
           grep -q 'FRAMEWORK_ENGINE_REPOSITORY' .github/workflows/FrameworkPatcher_Direct.yml
+          for workflow in Lite_Test.yml GamingPlus_Direct.yml FrameworkPatcher_Direct.yml; do
+            grep -q 'TELEGRAM_RELEASE_GROUP_ID' ".github/workflows/$workflow"
+          done
 
       - name: Reject hardcoded private repository names
         shell: bash
@@ -100,9 +104,6 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          # Direct workflow display names and explicit live-step labels use the
-          # DeadZone identity. Provider names are allowed only in implementation
-          # mechanics such as action identifiers and internal comments.
           for workflow in Lite_Test.yml GamingPlus_Direct.yml FrameworkPatcher_Direct.yml; do
             grep -q 'DeadZone' ".github/workflows/$workflow"
             if grep -E 'name: .*GitHub|name: .*Fly|name: .*Runner' ".github/workflows/$workflow"; then
@@ -110,3 +111,32 @@ jobs:
               exit 1
             fi
           done
+
+      - name: Publish launcher contract verification status
+        if: success() && github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -f state=success \
+            -f context=deadzone/build-contract \
+            -f description='DeadZone launcher contract validation passed' \
+            >/dev/null
+
+      - name: Publish launcher contract failure status
+        if: failure() && github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -f state=failure \
+            -f context=deadzone/build-contract \
+            -f description='DeadZone launcher contract validation failed' \
+            >/dev/null || true
