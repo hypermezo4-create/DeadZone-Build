@@ -17,7 +17,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Migrate DeadZone production endpoint and direct Telegram target
+      - name: Migrate DeadZone production endpoint
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -26,8 +26,6 @@ jobs:
 
           old_base = "https://deadzonebot.fly.dev"
           new_base = "https://deadzone-mezo-v3-20260726.fly.dev"
-          old_tg = "TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}"
-          new_tg = "TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_RELEASE_GROUP_ID || secrets.TELEGRAM_CHANNEL_ID }}"
 
           roots = [Path('.github/workflows'), Path('scripts')]
           candidates = [Path('README.md')]
@@ -36,17 +34,19 @@ jobs:
                   candidates.extend(path for path in root.rglob('*') if path.is_file())
 
           changed = []
+          migration = Path('.github/workflows/migrate-production-endpoint.yml')
           for path in candidates:
+              if path == migration:
+                  continue
               try:
                   text = path.read_text(encoding='utf-8')
               except UnicodeDecodeError:
                   continue
-              updated = text.replace(old_base, new_base).replace(old_tg, new_tg)
+              updated = text.replace(old_base, new_base)
               if updated != text:
                   path.write_text(updated, encoding='utf-8')
                   changed.append(str(path))
 
-          migration = Path('.github/workflows/migrate-production-endpoint.yml')
           if migration.exists():
               migration.unlink()
           print('Migrated:', *changed, sep='\n- ')
