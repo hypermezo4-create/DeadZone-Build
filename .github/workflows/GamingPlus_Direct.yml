@@ -54,7 +54,7 @@ jobs:
           echo "::add-mask::$ROM_LINK"
           printf '%s' "$ROM_LINK" | base64 -w0 > "$RUNNER_TEMP/deadzone-gamingplus-rom.b64"
 
-      - name: Prepare hosted runner disk
+      - name: Prepare build workspace
         uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
         with:
           swap-size-mb: 1024
@@ -178,6 +178,7 @@ jobs:
         continue-on-error: true
         env:
           NOTIFY_ERROR_LOG: build_action.log
+          NOTIFY_ERROR_REASON: "DeadZone System stopped this build safely. Detailed diagnostics remain private."
         shell: bash
         run: |
           rom="$(base64 --decode "$RUNNER_TEMP/deadzone-gamingplus-rom.b64" 2>/dev/null || true)"
