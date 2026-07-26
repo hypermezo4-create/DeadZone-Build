@@ -34,10 +34,6 @@ on:
       request_id:
         required: true
         type: string
-  push:
-    branches: [main]
-    paths:
-      - ".github/deadzone-lite-smoke.txt"
 
 permissions:
   contents: read
@@ -79,21 +75,12 @@ jobs:
         id: mode
         shell: bash
         env:
-          INPUT_EVENT_NAME: ${{ github.event_name }}
           INPUT_REQUEST_ID: ${{ inputs.request_id }}
           INPUT_ROM_LINK: ${{ inputs.rom_link }}
           INPUT_BUILDER_LABEL: ${{ inputs.builder_label }}
           INPUT_LANGUAGE: ${{ inputs.language }}
         run: |
           set -Eeuo pipefail
-
-          if [[ "$INPUT_EVENT_NAME" == "push" ]]; then
-            INPUT_REQUEST_ID=""
-            INPUT_ROM_LINK="$(tr -d '\r\n' < .github/deadzone-lite-smoke.txt)"
-            INPUT_BUILDER_LABEL="DeadZone Smoke Test"
-            INPUT_LANGUAGE="ar"
-          fi
-
           if [[ -n "${INPUT_REQUEST_ID:-}" ]]; then
             [[ "$INPUT_REQUEST_ID" =~ ^DZ-LT-[0-9]{8}-[0-9]{4}$ ]] || { echo "Invalid DeadZone Lite request ID" >&2; exit 1; }
             [[ -n "${BUILD_PROGRESS_SECRET:-}" ]] || { echo "Missing BUILD_PROGRESS_SECRET" >&2; exit 1; }
