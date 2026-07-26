@@ -1,0 +1,65 @@
+name: Self Sync Production Endpoint
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: deadzone-self-sync-production
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.actor != 'github-actions[bot]' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Synchronize production configuration
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          canonical=(
+            .github/workflows/MEZO_Lite.yml
+            .github/workflows/gamingplus.yml
+            .github/workflows/frameworkpatcher.yml
+          )
+          for file in "${canonical[@]}"; do
+            test -f "$file"
+            sed -i 's#https://deadzonebot\.fly\.dev#https://deadzone-mezo-v3-20260726.fly.dev#g' "$file"
+          done
+
+          direct=(
+            .github/workflows/Lite_Test.yml
+            .github/workflows/GamingPlus_Direct.yml
+            .github/workflows/FrameworkPatcher_Direct.yml
+          )
+          for file in "${direct[@]}"; do
+            test -f "$file"
+            sed -i 's/secrets\.TELEGRAM_CHANNEL_ID/secrets.TELEGRAM_RELEASE_GROUP_ID/g' "$file"
+          done
+
+          if grep -Rqs 'https://deadzonebot\.fly\.dev' "${canonical[@]}"; then
+            echo 'Old control endpoint remains in a canonical workflow.' >&2
+            exit 1
+          fi
+
+          git config user.name 'DeadZone Production Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          if git diff --quiet; then
+            echo 'Already synchronized.'
+            exit 0
+          fi
+          git add "${canonical[@]}" "${direct[@]}"
+          git commit -m 'ops: point workflows to verified DeadZone production'
+          git push origin HEAD:main
