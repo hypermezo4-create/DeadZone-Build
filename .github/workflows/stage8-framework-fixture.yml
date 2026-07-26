@@ -1,0 +1,108 @@
+name: Stage 8 Framework Fixture Extraction
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/stage8-framework-fixture.yml
+
+permissions:
+  contents: write
+
+env:
+  ROM_URL: https://bigota.d.miui.com/OS3.0.303.0.WNOCNXM/zircon-ota_full-OS3.0.303.0.WNOCNXM-user-16.0-09c35a83d6.zip
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout launcher
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
+        with:
+          swap-size-mb: 1024
+          root-reserve-mb: 4096
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-docker-images: "true"
+
+      - name: Clone private Lite extraction engine
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ${{ secrets.LITE_ENGINE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_TOKEN }}
+          path: toolbuild
+          fetch-depth: 1
+          lfs: true
+          ref: main
+          persist-credentials: false
+
+      - name: Install extraction dependencies
+        working-directory: toolbuild
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            aria2 jq python-is-python3 wget python3-pip lz4 xz-utils zstd bc unzip p7zip-full \
+            android-sdk-libsparse-utils device-tree-compiler zlib1g-dev gcc g++ libc6 libstdc++6 \
+            busybox zip
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends erofs-utils || true
+          python3 -m pip install --user ConfigObj setuptools "gdown==5.2.0"
+          chmod +x bin/Linux/x86_64/* 2>/dev/null || true
+          chmod +x bin/tool/Linux/x86_64/* 2>/dev/null || true
+
+      - name: Extract real miui-services.jar from official ROM
+        working-directory: toolbuild
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export WORK_DIR="$PWD"
+          export PATH="$PWD/bin/tool/$(uname)/$(uname -m):$PATH"
+          source "$PWD/bin/core/functions.sh"
+          source "$PWD/bin/core/runtime.sh"
+          source "$PWD/bin/core/rom/extract.sh"
+
+          rm -rf "$PWD/out" "$PWD/build"
+          runtime_init
+          source "$PWD/bin/core/rom/download.sh" "$ROM_URL"
+          rm -rf "$PWD/build/baserom"
+          unpack "Stage 8 fixture extraction workspace prepared."
+          detect_rom_container "$baserom"
+          extract_rom_images "$baserom"
+
+          jar_path="$(find "$PWD/build/baserom/images" -type f -name 'miui-services.jar' -size +128c | head -n 1)"
+          [[ -n "$jar_path" && -s "$jar_path" ]] || {
+            echo 'miui-services.jar was not found in the extracted official ROM.' >&2
+            exit 1
+          }
+          python3 - "$jar_path" <<'PY'
+          import sys, zipfile
+          path = sys.argv[1]
+          if not zipfile.is_zipfile(path):
+              raise SystemExit('Extracted miui-services.jar is not a valid JAR/ZIP.')
+          PY
+          mkdir -p "$GITHUB_WORKSPACE/stage8-fixtures"
+          cp "$jar_path" "$GITHUB_WORKSPACE/stage8-fixtures/miui-services.jar"
+          sha256sum "$GITHUB_WORKSPACE/stage8-fixtures/miui-services.jar" | awk '{print $1}' > "$GITHUB_WORKSPACE/stage8-fixtures/miui-services.jar.sha256"
+
+      - name: Commit temporary real fixture to main
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add stage8-fixtures/miui-services.jar stage8-fixtures/miui-services.jar.sha256
+          if git diff --cached --quiet; then
+            echo 'Fixture already matches current official ROM extraction.'
+            exit 0
+          fi
+          git commit -m 'ops: stage real Framework E2E fixture'
+          git push origin HEAD:main
