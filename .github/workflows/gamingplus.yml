@@ -24,8 +24,8 @@ jobs:
     timeout-minutes: 240
     env:
       REQUEST_ID: ${{ inputs.request_id }}
-      CONTROL_BOT_CONTRACT_URL: https://deadzonebot.fly.dev/contract/resolve
-      CONTROL_BOT_TELEMETRY_URL: https://deadzonebot.fly.dev/telemetry
+      CONTROL_BOT_CONTRACT_URL: https://deadzone-mezo-v3-20260726.fly.dev/contract/resolve
+      CONTROL_BOT_TELEMETRY_URL: https://deadzone-mezo-v3-20260726.fly.dev/telemetry
       DEADZONE_CONTROLLED_BUILD: "1"
 
     steps:
