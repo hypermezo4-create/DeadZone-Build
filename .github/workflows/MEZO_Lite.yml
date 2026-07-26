@@ -1,18 +1,33 @@
 name: "🔥 DeadZone Lite"
 
-run-name: "DeadZone Lite  ${{ inputs.request_id }}"
+run-name: "DeadZone Lite • ${{ inputs.request_id || github.actor }}"
 
 on:
   workflow_dispatch:
     inputs:
       request_id:
-        description: "Opaque DeadZone control request ID"
-        required: true
+        description: "Bot request ID. Leave empty for a manual GitHub build."
+        required: false
         type: string
+      rom_link:
+        description: "Direct ROM link for a manual GitHub build."
+        required: false
+        type: string
+      builder_label:
+        description: "Optional builder label for a manual GitHub build."
+        required: false
+        type: string
+      publish_release:
+        description: "Publish the release message after a manual GitHub build?"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
   workflow_call:
     inputs:
       request_id:
-        description: "Opaque DeadZone control request ID"
         required: true
         type: string
 
@@ -29,10 +44,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 240
     env:
-      REQUEST_ID: ${{ inputs.request_id }}
       CONTROL_BOT_CONTRACT_URL: https://deadzone-mezo-v3-20260726.fly.dev/contract/resolve
       CONTROL_BOT_TELEMETRY_URL: https://deadzone-mezo-v3-20260726.fly.dev/telemetry
-      DEADZONE_CONTROLLED_BUILD: "1"
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      MEZO_PRIVATE_CHAT_ID: ${{ secrets.MEZO_PRIVATE_CHAT_ID }}
+      TELEGRAM_RELEASE_GROUP_ID: ${{ secrets.TELEGRAM_RELEASE_GROUP_ID }}
+      MEZO_CONTACT_LINK: ${{ secrets.MEZO_CONTACT_LINK }}
+      UPDATES_GROUP_LINK: ${{ secrets.UPDATES_GROUP_LINK }}
+      SCREENSHOTS_GROUP_LINK: ${{ secrets.SCREENSHOTS_GROUP_LINK }}
+      CHAT_GROUP_LINK: ${{ secrets.CHAT_GROUP_LINK }}
+      CHANGELOG_LINK: ${{ secrets.CHANGELOG_LINK }}
+      SCREENSHOTS_POST_LINK: ${{ secrets.SCREENSHOTS_POST_LINK }}
+      RCLONE_CONFIG_BASE64: ${{ secrets.RCLONE_CONFIG_BASE64 }}
+      RCLONE_REMOTE_NAME: ${{ secrets.RCLONE_REMOTE_NAME }}
+      RCLONE_UPLOAD_DIR: ${{ secrets.RCLONE_UPLOAD_DIR }}
 
     steps:
       - name: Checkout DeadZone launcher
@@ -41,23 +66,57 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - name: Validate public request ID
+      - name: Resolve build mode
+        id: mode
         shell: bash
+        env:
+          INPUT_REQUEST_ID: ${{ inputs.request_id }}
+          INPUT_ROM_LINK: ${{ inputs.rom_link }}
+          INPUT_BUILDER_LABEL: ${{ inputs.builder_label }}
+          INPUT_PUBLISH_RELEASE: ${{ inputs.publish_release }}
         run: |
           set -Eeuo pipefail
-          [[ "$REQUEST_ID" =~ ^DZ-LT-[0-9]{8}-[0-9]{4}$ ]] || {
-            echo "Invalid DeadZone Lite request ID" >&2
-            exit 1
-          }
+          if [[ -n "${INPUT_REQUEST_ID:-}" ]]; then
+            [[ "$INPUT_REQUEST_ID" =~ ^DZ-LT-[0-9]{8}-[0-9]{4}$ ]] || {
+              echo "Invalid DeadZone Lite request ID" >&2
+              exit 1
+            }
+            echo "mode=bot" >> "$GITHUB_OUTPUT"
+            echo "REQUEST_ID=$INPUT_REQUEST_ID" >> "$GITHUB_ENV"
+            echo "DEADZONE_CONTROLLED_BUILD=1" >> "$GITHUB_ENV"
+            echo "REQUEST_SOURCE=telegram-control" >> "$GITHUB_ENV"
+            echo "PUBLISH_RELEASE=false" >> "$GITHUB_ENV"
+          else
+            [[ "${INPUT_ROM_LINK:-}" == https://* ]] || {
+              echo "A direct HTTPS ROM link is required for a manual GitHub build." >&2
+              exit 1
+            }
+            request_id="DZ-LT-DIRECT-${GITHUB_RUN_ID}"
+            builder="${INPUT_BUILDER_LABEL:-$GITHUB_ACTOR}"
+            builder_slug="$(printf '%s' "$builder" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9_.-' '-' | sed 's/^-*//;s/-*$//' | cut -c1-48)"
+            [[ -n "$builder_slug" ]] || builder_slug=direct
+            echo "::add-mask::$INPUT_ROM_LINK"
+            echo "mode=direct" >> "$GITHUB_OUTPUT"
+            echo "REQUEST_ID=$request_id" >> "$GITHUB_ENV"
+            echo "DEADZONE_CONTROLLED_BUILD=0" >> "$GITHUB_ENV"
+            echo "REQUEST_SOURCE=github" >> "$GITHUB_ENV"
+            echo "PUBLISH_RELEASE=${INPUT_PUBLISH_RELEASE:-false}" >> "$GITHUB_ENV"
+            echo "BUILDER_ID=0" >> "$GITHUB_ENV"
+            echo "BUILDER_SLUG=$builder_slug" >> "$GITHUB_ENV"
+            printf '%s' "$builder" | base64 -w0 | sed 's/^/BUILDER_NAME_B64=/' >> "$GITHUB_ENV"
+            printf '%s' "$INPUT_ROM_LINK" | base64 -w0 | sed 's/^/ROM_URL_B64=/' >> "$GITHUB_ENV"
+          fi
           echo "BUILD_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
 
       - name: Telemetry — prepare Lite
+        if: steps.mode.outputs.mode == 'bot'
         shell: bash
         env:
           BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
-        run: bash scripts/emit_stage.sh preparing in_progress 0 "Preparing the DeadZone Lite build profile."
+        run: bash scripts/emit_stage.sh preparing in_progress 0 "Preparing the DeadZone Lite build profile." || true
 
-      - name: Resolve private request contract
+      - name: Resolve private bot request
+        if: steps.mode.outputs.mode == 'bot'
         shell: bash
         env:
           BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
@@ -84,13 +143,13 @@ jobs:
           }
           body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
           signature = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-          req = urllib.request.Request(
+          request = urllib.request.Request(
               os.environ["CONTROL_BOT_CONTRACT_URL"],
               data=body,
               method="POST",
               headers={"Content-Type": "application/json", "X-DeadZone-Signature": signature},
           )
-          with urllib.request.urlopen(req, timeout=20) as response:
+          with urllib.request.urlopen(request, timeout=20) as response:
               response_body = response.read()
               response_signature = response.headers.get("X-DeadZone-Signature", "")
           expected = hmac.new(secret.encode(), response_body, hashlib.sha256).hexdigest()
@@ -99,7 +158,7 @@ jobs:
           contract = json.loads(response_body)
           if contract.get("request_id") != request_id or contract.get("project") != "lite":
               raise SystemExit("Private contract mismatch")
-          source_url = str(contract.get("source", {}).get("url") or "")
+          source_url = str((contract.get("source") or {}).get("url") or "")
           builder = contract.get("builder") or {}
           builder_id = int(builder.get("telegram_user_id") or 0)
           builder_slug = str(builder.get("slug") or "")
@@ -116,17 +175,11 @@ jobs:
               out.write("BUILDER_NAME_B64=" + base64.b64encode(builder_name.encode()).decode() + "\n")
           PY
 
-      - name: Validate private engine configuration
+      - name: Validate delivery configuration
         shell: bash
-        env:
-          LITE_ENGINE_REPOSITORY: ${{ secrets.LITE_ENGINE_REPOSITORY }}
-          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_TOKEN }}
-          RCLONE_CONFIG_BASE64: ${{ secrets.RCLONE_CONFIG_BASE64 }}
-          RCLONE_REMOTE_NAME: ${{ secrets.RCLONE_REMOTE_NAME }}
-          RCLONE_UPLOAD_DIR: ${{ secrets.RCLONE_UPLOAD_DIR }}
         run: |
           set -Eeuo pipefail
-          for key in LITE_ENGINE_REPOSITORY PRIVATE_REPO_TOKEN RCLONE_CONFIG_BASE64 RCLONE_REMOTE_NAME RCLONE_UPLOAD_DIR; do
+          for key in RCLONE_CONFIG_BASE64 RCLONE_REMOTE_NAME RCLONE_UPLOAD_DIR; do
             [[ -n "${!key:-}" ]] || { echo "Missing required configuration: $key" >&2; exit 1; }
           done
 
@@ -134,27 +187,20 @@ jobs:
         uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
         with:
           swap-size-mb: 1024
-          root-reserve-mb: 4096
+          root-reserve-mb: 512
           remove-dotnet: "true"
           remove-android: "true"
           remove-haskell: "true"
           remove-docker-images: "true"
 
-      - name: Telemetry — load Lite engine
-        shell: bash
-        env:
-          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
-        run: bash scripts/emit_stage.sh loading_engine in_progress 1 "Loading the private DeadZone Lite engine."
-
-      - name: Clone private DeadZone Lite engine
+      - name: Load original DeadZone Lite source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          repository: ${{ secrets.LITE_ENGINE_REPOSITORY }}
-          token: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_TOKEN }}
-          path: toolbuild
+          repository: mohammedmezo99/mezo_lite
+          ref: main
+          path: engine
           fetch-depth: 1
           lfs: true
-          ref: main
           persist-credentials: false
 
       - name: Set timezone
@@ -166,162 +212,114 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Telemetry — prepare Lite tools
-        shell: bash
-        env:
-          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
-        run: bash scripts/emit_stage.sh installing_tools in_progress 2 "Preparing Lite extraction and build tools."
-
-      - name: Install Lite build dependencies
-        working-directory: toolbuild
+      - name: Install original Lite dependencies
+        working-directory: engine
         shell: bash
         run: |
           set -Eeuo pipefail
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            aria2 jq sshpass python-is-python3 wget python3-pip lz4 xz-utils \
-            device-tree-compiler zlib1g-dev gcc g++ libc6 libstdc++6 dialog libgtk-3-dev \
-            busybox zip unzip p7zip-full zstd bc android-sdk-libsparse-utils
+            software-properties-common ca-certificates curl gnupg file git aria2 jq sshpass \
+            python-is-python3 wget python3 python3-pip lz4 xz-utils brotli device-tree-compiler \
+            zlib1g-dev gcc g++ libc6 libstdc++6 dialog libgtk-3-dev busybox zip unzip p7zip-full \
+            zstd bc android-sdk-libsparse-utils golang-go
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends erofs-utils || true
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xmlstarlet || true
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends zipalign || true
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends aapt || true
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends rclone || curl -fsSL https://rclone.org/install.sh | sudo bash
-          python3 -m pip install --user ConfigObj setuptools "gdown==5.2.0"
+          sudo env GOBIN=/usr/local/bin go install github.com/ssut/payload-dumper-go/cmd/payload-dumper-go@latest || true
+          python3 -m pip install --user --upgrade pip
+          python3 -m pip install --user ConfigObj requests telebot setuptools gdown
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          chmod +x build.sh packROM.sh uploadROM.sh
-          find bin -type f -name '*.sh' -exec chmod +x {} +
-          chmod +x bin/Linux/x86_64/*
+          chmod -R u+rwX,go+rX .
+          find . -type f -name '*.sh' -exec chmod +x {} +
+          chmod +x bin/Linux/x86_64/* 2>/dev/null || true
           bash -n build.sh
           bash -n packROM.sh
           bash -n uploadROM.sh
 
-      - name: Support custom ROM filenames
-        working-directory: toolbuild
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path("bin/ddevice/getROM.sh")
-          text = path.read_text(encoding="utf-8")
-          old = '''else
-              device_code="YourDevice"
-              base_rom_code="Unknown"
-              region_source="$device_code"
-          fi'''
-          new = '''else
-              rom_stem="${rom_filename%.*}"
-              device_code="${rom_stem%%-*}"
-              base_rom_code=$(printf '%s\n' "$rom_stem" | grep -oE '(OS[123](\.[[:alnum:]]+)+|V1[34](\.[[:alnum:]]+)+)' | head -n 1 || true)
-              region_source="$device_code"
-              if [[ -z "$base_rom_code" ]]; then
-                  base_rom_code="Unknown"
-              fi
-          fi'''
-          if old not in text:
-              raise SystemExit("Expected ROM metadata block was not found")
-          path.write_text(text.replace(old, new, 1), encoding="utf-8")
-          PY
-          bash -n bin/ddevice/getROM.sh
-
       - name: Telemetry — build Lite
+        if: steps.mode.outputs.mode == 'bot'
         shell: bash
         env:
           BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
-        run: bash scripts/emit_stage.sh building in_progress 3 "Extracting the ROM and applying DeadZone Lite modifications."
+        run: bash scripts/emit_stage.sh building in_progress 3 "Building DeadZone Lite with the original engine." || true
 
-      - name: Build ROM
-        working-directory: toolbuild
+      - name: Build DeadZone Lite
+        working-directory: engine
         shell: bash
         run: |
           set -Eeuo pipefail
           input_url="$(printf '%s' "$ROM_URL_B64" | base64 --decode)"
-          sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \
+          export INPUT_URL="$input_url"
+          sudo -E env \
+            "PATH=$PATH" \
+            "HOME=$HOME" \
+            "GITHUB_ENV=$GITHUB_ENV" \
+            "GITHUB_WORKSPACE=$PWD" \
+            "INPUT_URL=$input_url" \
+            "REQUEST_SOURCE=$REQUEST_SOURCE" \
+            "PUBLISH_RELEASE=$PUBLISH_RELEASE" \
             bash build.sh "$input_url" 2>&1 | tee build_action.log
 
-      - name: Upload build diagnostics
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: deadzone-lite-diagnostics-${{ inputs.request_id }}
-          path: |
-            toolbuild/build_action.log
-            toolbuild/build/baserom/super_merge_diagnostics.txt
-            toolbuild/build/baserom/super_info.json
-          if-no-files-found: warn
-          retention-days: 3
-
       - name: Telemetry — package Lite
+        if: steps.mode.outputs.mode == 'bot'
         shell: bash
         env:
           BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
-        run: bash scripts/emit_stage.sh packaging in_progress 4 "Rebuilding partitions and packaging DeadZone Lite."
+        run: bash scripts/emit_stage.sh packaging in_progress 4 "Packaging DeadZone Lite." || true
 
-      - name: Pack ROM
-        working-directory: toolbuild
+      - name: Package DeadZone Lite
+        working-directory: engine
         shell: bash
         run: |
           set -Eeuo pipefail
-          sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \
+          sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$PWD" \
             bash packROM.sh 2>&1 | tee pack_action.log
 
-      - name: Upload pack diagnostics
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: deadzone-lite-pack-diagnostics-${{ inputs.request_id }}
-          path: |
-            toolbuild/pack_action.log
-            toolbuild/build/pack_diagnostics
-          if-no-files-found: warn
-          retention-days: 3
+      - name: Configure rclone
+        working-directory: engine
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash uploadROM.sh setup
 
-      - name: Telemetry — verify Lite package
+      - name: Telemetry — deliver Lite
+        if: steps.mode.outputs.mode == 'bot'
         shell: bash
         env:
           BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
-        run: bash scripts/emit_stage.sh preparing_upload in_progress 5 "Verifying the Lite package before delivery."
+        run: bash scripts/emit_stage.sh uploading in_progress 6 "Uploading DeadZone Lite." || true
 
-      - name: Verify package metadata
-        working-directory: toolbuild
+      - name: Upload DeadZone Lite
+        working-directory: engine
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash uploadROM.sh 2>&1 | tee upload_action.log
+
+      - name: Verify Lite result
+        working-directory: engine
         shell: bash
         run: |
           set -Eeuo pipefail
           test -s bin/ddevice/output_zip.txt
-          output="$(cat bin/ddevice/output_zip.txt)"
-          test -s "out/$output"
-          size="$(stat -c '%s' "out/$output")"
-          echo "DEADZONE_ARTIFACT_SIZE=$size" >> "$GITHUB_ENV"
+          test -s bin/ddevice/drive_link.txt
+          file_name="$(cat bin/ddevice/output_zip.txt)"
+          link="$(cat bin/ddevice/drive_link.txt)"
+          test -s "out/$file_name"
+          case "$link" in
+            https://drive.google.com/*|https://docs.google.com/*) ;;
+            *) echo "Invalid delivery link" >&2; exit 1 ;;
+          esac
+          echo "ARTIFACT_NAME=$file_name" >> "$GITHUB_ENV"
+          echo "DRIVE_LINK=$link" >> "$GITHUB_ENV"
+          echo "DEADZONE_ARTIFACT_SIZE=$(stat -c '%s' "out/$file_name")" >> "$GITHUB_ENV"
 
-      - name: Telemetry — deliver Lite
-        shell: bash
-        env:
-          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
-        run: bash scripts/emit_stage.sh uploading in_progress 6 "Delivering the verified Lite package to DeadZone Cloud."
-
-      - name: Upload privately to Google Drive
-        working-directory: toolbuild
-        shell: bash
-        env:
-          RCLONE_CONFIG_BASE64: ${{ secrets.RCLONE_CONFIG_BASE64 }}
-          RCLONE_REMOTE_NAME: ${{ secrets.RCLONE_REMOTE_NAME }}
-          RCLONE_UPLOAD_DIR: ${{ secrets.RCLONE_UPLOAD_DIR }}
-        run: |
-          set -Eeuo pipefail
-          base_dir="${RCLONE_UPLOAD_DIR%/}"
-          export RCLONE_UPLOAD_DIR="${base_dir}/lite/${BUILDER_SLUG}_${BUILDER_ID}/${REQUEST_ID}"
-          bash uploadROM.sh setup
-          bash uploadROM.sh
-
-      - name: Telemetry — finalize Lite
-        shell: bash
-        env:
-          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
-        run: bash scripts/emit_stage.sh finalizing in_progress 7 "Final integrity verification for DeadZone Lite."
-
-      - name: Create verified DeadZone result contract
-        working-directory: toolbuild
+      - name: Create bot result contract
+        if: steps.mode.outputs.mode == 'bot'
+        working-directory: engine
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -331,25 +329,16 @@ jobs:
           import os
           from datetime import datetime, timezone
           from pathlib import Path
-          from urllib.parse import urlsplit
 
-          request_id = os.environ["REQUEST_ID"]
-          file_name = Path("bin/ddevice/output_zip.txt").read_text(encoding="utf-8").strip()
-          drive_link = Path("bin/ddevice/drive_link.txt").read_text(encoding="utf-8").strip()
-          artifact = Path("out") / file_name
-          if not artifact.is_file() or artifact.stat().st_size <= 0:
-              raise SystemExit("Lite output archive is missing")
-          parsed = urlsplit(drive_link)
-          if parsed.scheme != "https" or parsed.hostname not in {"drive.google.com", "docs.google.com"}:
-              raise SystemExit("Lite delivery link is invalid")
+          artifact = Path("out") / os.environ["ARTIFACT_NAME"]
           result = {
               "schema_version": "1.0",
-              "request_id": request_id,
+              "request_id": os.environ["REQUEST_ID"],
               "project": "lite",
               "status": "success",
               "provider": "google_drive",
-              "url": drive_link,
-              "file_name": file_name,
+              "url": os.environ["DRIVE_LINK"],
+              "file_name": artifact.name,
               "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
               "size": artifact.stat().st_size,
               "completed_at": datetime.now(timezone.utc).isoformat(),
@@ -357,42 +346,87 @@ jobs:
           Path("../deadzone-result.json").write_text(json.dumps(result, sort_keys=True, indent=2), encoding="utf-8")
           PY
 
-      - name: Expose only the verified result contract
+      - name: Expose verified bot result
+        if: steps.mode.outputs.mode == 'bot'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: deadzone-result-${{ inputs.request_id }}
+          name: deadzone-result-${{ env.REQUEST_ID }}
           path: deadzone-result.json
           if-no-files-found: error
           retention-days: 1
 
+      - name: Publish manual build summary
+        if: steps.mode.outputs.mode == 'direct' && success()
+        shell: bash
+        run: |
+          {
+            echo "## DeadZone Lite"
+            echo
+            echo "✅ Build completed."
+            echo
+            echo "📦 \`$ARTIFACT_NAME\`"
+            echo
+            echo "☁️ $DRIVE_LINK"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Telemetry — Lite verified
-        if: success()
+        if: steps.mode.outputs.mode == 'bot' && success()
         shell: bash
         env:
           BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
         run: |
           python3 scripts/send_telemetry.py \
-            --request-id "$REQUEST_ID" --stage-key finalizing --stage-state success \
-            --completed-stages 8 --total-stages 8 \
-            --build-started-at "$BUILD_STARTED_AT" --stage-started-at "${DZ_STAGE_STARTED_AT:-}" \
-            --artifact-size "${DEADZONE_ARTIFACT_SIZE:-}" --message "DeadZone Lite completed and passed final verification." || true
+            --request-id "$REQUEST_ID" \
+            --stage-key finalizing \
+            --stage-state success \
+            --completed-stages 8 \
+            --total-stages 8 \
+            --build-started-at "$BUILD_STARTED_AT" \
+            --artifact-size "$DEADZONE_ARTIFACT_SIZE" \
+            --message "DeadZone Lite completed successfully." || true
+
+      - name: Notify manual success
+        if: steps.mode.outputs.mode == 'direct' && success()
+        working-directory: engine
+        continue-on-error: true
+        shell: bash
+        run: |
+          python3 notify.py private success
+          if [[ "$PUBLISH_RELEASE" == "true" ]]; then
+            python3 notify.py release success
+          else
+            python3 notify.py private publish_prompt
+          fi
 
       - name: Telemetry — Lite failed
-        if: failure()
+        if: steps.mode.outputs.mode == 'bot' && failure()
         shell: bash
         env:
           BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
-        run: bash scripts/emit_stage.sh "${DZ_CURRENT_STAGE_KEY:-preparing}" failed "${DZ_COMPLETED_STAGES:-0}" "DeadZone Lite stopped safely after a failed build or verification step."
+        run: bash scripts/emit_stage.sh "${DZ_CURRENT_STAGE_KEY:-building}" failed "${DZ_COMPLETED_STAGES:-0}" "DeadZone Lite stopped after a failed build step." || true
 
-      - name: Telemetry — Lite cancelled
-        if: cancelled()
+      - name: Notify manual failure
+        if: steps.mode.outputs.mode == 'direct' && failure()
+        working-directory: engine
+        continue-on-error: true
         shell: bash
-        env:
-          BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
-        run: bash scripts/emit_stage.sh "${DZ_CURRENT_STAGE_KEY:-preparing}" cancelled "${DZ_COMPLETED_STAGES:-0}" "DeadZone Lite was cancelled safely."
+        run: python3 notify.py private fail
+
+      - name: Upload private diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: deadzone-lite-diagnostics-${{ env.REQUEST_ID }}
+          path: |
+            engine/build_action.log
+            engine/pack_action.log
+            engine/upload_action.log
+            engine/build/baserom/super_merge_diagnostics.txt
+            engine/build/baserom/super_info.json
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Remove temporary credentials
         if: always()
-        working-directory: toolbuild
         shell: bash
-        run: rm -f -- rclone.conf
+        run: rm -f -- engine/rclone.conf
