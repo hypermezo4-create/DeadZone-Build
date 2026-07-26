@@ -1,0 +1,344 @@
+name: "🧩 FrameworkPatcher DeadZone — Direct Build"
+
+run-name: "FrameworkPatcher Direct • Android ${{ inputs.android_version }} • ${{ inputs.device_name }} • #${{ github.run_number }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      android_version:
+        description: "Android major version"
+        required: true
+        type: choice
+        options: ['13', '14', '15', '16']
+      device_name:
+        description: "Safe device label"
+        required: true
+        type: string
+      rom_version:
+        description: "ROM version"
+        required: true
+        type: string
+      features:
+        description: "Comma-separated feature keys"
+        required: true
+        type: string
+      framework_url:
+        description: "HTTPS URL for framework.jar"
+        required: false
+        type: string
+      services_url:
+        description: "HTTPS URL for services.jar"
+        required: false
+        type: string
+      miui_services_url:
+        description: "HTTPS URL for miui-services.jar"
+        required: false
+        type: string
+      miui_framework_url:
+        description: "HTTPS URL for miui-framework.jar"
+        required: false
+        type: string
+      builder_label:
+        description: "Optional builder display label"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deadzone-frameworkpatcher-direct
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: "🧩 Build FrameworkPatcher DeadZone"
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      REQUEST_ID: "DZ-FP-DIRECT-${{ github.run_id }}"
+      BUILDER_NAME: ${{ inputs.builder_label || github.actor }}
+      BUILDER_ID: ""
+      ANDROID_VERSION: ${{ inputs.android_version }}
+      DEVICE_NAME: ${{ inputs.device_name }}
+      ROM_VERSION: ${{ inputs.rom_version }}
+      DEADZONE_FEATURES: ${{ inputs.features }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+      RCLONE_CONFIG_BASE64: ${{ secrets.RCLONE_CONFIG_BASE64 }}
+      RCLONE_REMOTE_NAME: ${{ secrets.RCLONE_REMOTE_NAME }}
+      RCLONE_UPLOAD_DIR: ${{ secrets.RCLONE_UPLOAD_DIR }}
+
+    steps:
+      - name: Validate direct request
+        shell: bash
+        env:
+          FRAMEWORK_URL: ${{ inputs.framework_url }}
+          SERVICES_URL: ${{ inputs.services_url }}
+          MIUI_SERVICES_URL: ${{ inputs.miui_services_url }}
+          MIUI_FRAMEWORK_URL: ${{ inputs.miui_framework_url }}
+          FRAMEWORK_ENGINE_REPOSITORY: ${{ secrets.FRAMEWORK_ENGINE_REPOSITORY }}
+          FRAMEWORK_MODULE_REPOSITORY: ${{ secrets.FRAMEWORK_MODULE_REPOSITORY }}
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$DEVICE_NAME" =~ ^[A-Za-z0-9_.-]{1,48}$ ]] || { echo "Invalid device label" >&2; exit 1; }
+          [[ "$ROM_VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._()+\ -]{0,63}$ ]] || { echo "Invalid ROM version" >&2; exit 1; }
+          [[ -n "$FRAMEWORK_ENGINE_REPOSITORY" && -n "$FRAMEWORK_MODULE_REPOSITORY" && -n "$PRIVATE_REPO_TOKEN" ]] || {
+            echo "Missing private FrameworkPatcher configuration" >&2; exit 1;
+          }
+          found=0
+          for key in FRAMEWORK_URL SERVICES_URL MIUI_SERVICES_URL MIUI_FRAMEWORK_URL; do
+            value="${!key:-}"
+            if [[ -n "$value" ]]; then
+              [[ "$value" == https://* ]] || { echo "$key must use HTTPS" >&2; exit 1; }
+              echo "::add-mask::$value"
+              found=1
+            fi
+          done
+          (( found == 1 )) || { echo "At least one JAR URL is required" >&2; exit 1; }
+          for key in RCLONE_CONFIG_BASE64 RCLONE_REMOTE_NAME; do
+            [[ -n "${!key:-}" ]] || { echo "Missing $key" >&2; exit 1; }
+          done
+
+      - name: Load FrameworkPatcher engine
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ${{ secrets.FRAMEWORK_ENGINE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_TOKEN }}
+          ref: main
+          path: engine
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Load FrameworkPatcher module template
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ${{ secrets.FRAMEWORK_MODULE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_TOKEN }}
+          ref: main
+          path: module-template
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Prepare engine configuration
+        shell: bash
+        env:
+          FRAMEWORK_URL: ${{ inputs.framework_url }}
+          SERVICES_URL: ${{ inputs.services_url }}
+          MIUI_SERVICES_URL: ${{ inputs.miui_services_url }}
+          MIUI_FRAMEWORK_URL: ${{ inputs.miui_framework_url }}
+        run: |
+          set -Eeuo pipefail
+          rm -rf engine/templates/framework-patcher-module
+          mkdir -p engine/templates
+          mv module-template engine/templates/framework-patcher-module
+          python3 - <<'PY'
+          import json, os, re
+          features = [x.strip() for x in os.environ["DEADZONE_FEATURES"].split(",") if x.strip()]
+          allowed = {
+              "disable_signature_verification", "cn_notification_fix", "disable_secure_flag",
+              "kaorios_toolbox", "add_gboard",
+          }
+          if not features or len(features) != len(set(features)) or any(x not in allowed for x in features):
+              raise SystemExit("Invalid feature selection")
+          android = os.environ["ANDROID_VERSION"]
+          if android in {"13", "14"} and any(x in {"cn_notification_fix", "disable_secure_flag"} for x in features):
+              raise SystemExit("Selected feature is unavailable on this Android version")
+          config = {
+              "request_id": os.environ["REQUEST_ID"],
+              "android_version": android,
+              "api_level": {"13":"33", "14":"34", "15":"35", "16":"36"}[android],
+              "device_name": os.environ["DEVICE_NAME"],
+              "rom_version": os.environ["ROM_VERSION"],
+              "features": features,
+              "urls": {
+                  "framework_url": os.environ.get("FRAMEWORK_URL", ""),
+                  "services_url": os.environ.get("SERVICES_URL", ""),
+                  "miui_services_url": os.environ.get("MIUI_SERVICES_URL", ""),
+                  "miui_framework_url": os.environ.get("MIUI_FRAMEWORK_URL", ""),
+              },
+              "telegram_files": {},
+              "builder_id": 0,
+              "builder_slug": re.sub(r"[^a-z0-9_.-]+", "-", os.environ["BUILDER_NAME"].lower()).strip("-._")[:48] or "direct",
+          }
+          open("engine/build-config.json", "w", encoding="utf-8").write(json.dumps(config, indent=2))
+          PY
+
+      - name: Set up Java 17
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Prepare FrameworkPatcher tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -m venv .venv
+          . .venv/bin/activate
+          python -m pip install "gdown==5.2.0" requests
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq p7zip-full rclone
+          python3 -m py_compile engine/notify.py
+
+      - name: Live — Framework initialize
+        working-directory: engine
+        continue-on-error: true
+        run: python3 notify.py start "$REQUEST_ID" "$BUILDER_NAME" "$BUILDER_ID"
+
+      - name: Live — validate Framework inputs
+        working-directory: engine
+        continue-on-error: true
+        run: python3 notify.py validate "$REQUEST_ID" "$BUILDER_NAME" "$BUILDER_ID"
+
+      - name: Validate Framework inputs
+        working-directory: engine
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json, pathlib, subprocess, urllib.request, zipfile
+          config = json.load(open("build-config.json", encoding="utf-8"))
+          names = {
+              "framework_url": "framework.jar", "services_url": "services.jar",
+              "miui_services_url": "miui-services.jar", "miui_framework_url": "miui-framework.jar",
+          }
+          active = []
+          for key, filename in names.items():
+              url = str(config["urls"].get(key) or "")
+              if not url:
+                  continue
+              target = pathlib.Path(filename)
+              if "drive.google.com" in url or "docs.google.com" in url:
+                  subprocess.run(["python3", "-m", "gdown", "--fuzzy", url, "-O", str(target)], check=True)
+              else:
+                  request = urllib.request.Request(url, headers={"User-Agent":"DeadZone-System/1.0"})
+                  with urllib.request.urlopen(request, timeout=120) as response, target.open("wb") as out:
+                      total = 0
+                      while True:
+                          chunk = response.read(1024 * 1024)
+                          if not chunk: break
+                          total += len(chunk)
+                          if total > 1610612736: raise SystemExit("Input JAR exceeds limit")
+                          out.write(chunk)
+              if target.stat().st_size < 128 or not zipfile.is_zipfile(target):
+                  raise SystemExit(f"Invalid JAR: {filename}")
+              active.append(key)
+          if not active: raise SystemExit("No valid JAR inputs")
+          config["active_inputs"] = active
+          pathlib.Path("build-config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
+          PY
+
+      - name: Live — apply FrameworkPatcher
+        working-directory: engine
+        continue-on-error: true
+        run: python3 notify.py patch "$REQUEST_ID" "$BUILDER_NAME" "$BUILDER_ID"
+
+      - name: Apply FrameworkPatcher
+        working-directory: engine
+        shell: bash
+        env:
+          DEADZONE_STRICT_PATCHES: '1'
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json, subprocess, sys
+          jar_flags = {
+              "framework_url":"--framework", "services_url":"--services",
+              "miui_services_url":"--miui-services", "miui_framework_url":"--miui-framework",
+          }
+          feature_flags = {
+              "disable_signature_verification":"--disable-signature-verification",
+              "cn_notification_fix":"--cn-notification-fix", "disable_secure_flag":"--disable-secure-flag",
+              "kaorios_toolbox":"--kaorios-toolbox", "add_gboard":"--add-gboard",
+          }
+          c = json.load(open("build-config.json", encoding="utf-8"))
+          args = ["bash", "-e", "-u", "-o", "pipefail", f"scripts/patcher_a{c['android_version']}.sh", c["api_level"], c["device_name"], c["rom_version"]]
+          args += [jar_flags[x] for x in c["active_inputs"]]
+          args += [feature_flags[x] for x in c["features"]]
+          with open("deadzone-build.log", "w", encoding="utf-8") as log:
+              p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+              for line in p.stdout or []:
+                  sys.stdout.write(line); log.write(line)
+              code = p.wait()
+          if code: raise SystemExit(code)
+          PY
+
+      - name: Live — build Framework module
+        working-directory: engine
+        continue-on-error: true
+        run: python3 notify.py module "$REQUEST_ID" "$BUILDER_NAME" "$BUILDER_ID"
+
+      - name: Build FrameworkPatcher module
+        working-directory: engine
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if grep -Eiq 'Strict patch contract failed|Critical Error|Method .+ not found|File not found' deadzone-build.log; then
+            echo "A requested patch target was not applied" >&2; exit 1
+          fi
+          python3 - <<'PY'
+          import glob, hashlib, pathlib, re
+          outputs = glob.glob("Framework-Patcher-*.zip")
+          if len(outputs) != 1: raise SystemExit("Expected exactly one output module")
+          archive = pathlib.Path(outputs[0])
+          if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.zip", archive.name) or archive.stat().st_size <= 0:
+              raise SystemExit("Unsafe or empty FrameworkPatcher output")
+          pathlib.Path("artifact.env").write_text(
+              f"ARTIFACT={archive.name}\nSHA256={hashlib.sha256(archive.read_bytes()).hexdigest()}\nSIZE={archive.stat().st_size}\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Live — deliver Framework module
+        working-directory: engine
+        continue-on-error: true
+        run: python3 notify.py upload "$REQUEST_ID" "$BUILDER_NAME" "$BUILDER_ID"
+
+      - name: Upload FrameworkPatcher module
+        working-directory: engine
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source artifact.env
+          export ARTIFACT_NAME="$ARTIFACT"
+          safe_builder="$(printf '%s' "$BUILDER_NAME" | tr -cs 'A-Za-z0-9._-' '_' | cut -c1-48)"
+          config="$RUNNER_TEMP/deadzone-framework-rclone.conf"
+          umask 077
+          printf '%s' "$RCLONE_CONFIG_BASE64" | base64 --decode > "$config"
+          remote_root="${RCLONE_UPLOAD_DIR:-module}"; remote_root="${remote_root#/}"; remote_root="${remote_root%/}"
+          remote="${RCLONE_REMOTE_NAME}:${remote_root}/frameworkpatcher/direct/${safe_builder}/${GITHUB_RUN_ID}/Android${ANDROID_VERSION}/${DEVICE_NAME}/${ARTIFACT}"
+          rclone --config "$config" copyto "$ARTIFACT" "$remote" --immutable --transfers 1
+          link="$(rclone --config "$config" link "$remote")"
+          case "$link" in https://drive.google.com/*|https://docs.google.com/*) ;; *) echo "Invalid delivery link" >&2; exit 1 ;; esac
+          echo "::add-mask::$link"
+          echo "DRIVE_LINK=$link" >> "$GITHUB_ENV"
+          echo "ARTIFACT_NAME=$ARTIFACT" >> "$GITHUB_ENV"
+
+      - name: Live — Framework complete
+        if: success()
+        working-directory: engine
+        continue-on-error: true
+        run: python3 notify.py success "$REQUEST_ID" "$BUILDER_NAME" "$BUILDER_ID"
+
+      - name: Live — Framework failed
+        if: failure()
+        working-directory: engine
+        continue-on-error: true
+        run: python3 notify.py fail "$REQUEST_ID" "$BUILDER_NAME" "$BUILDER_ID"
+
+      - name: Upload private diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: frameworkpatcher-direct-diagnostics-${{ github.run_id }}
+          path: engine/deadzone-build.log
+          if-no-files-found: warn
+          retention-days: 3
+
+      - name: Remove temporary credentials
+        if: always()
+        shell: bash
+        run: rm -f -- "$RUNNER_TEMP/deadzone-framework-rclone.conf"
