@@ -1,0 +1,55 @@
+name: Temporary Telegram Sound Proof
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/_sound_smoke_proof.yml
+
+permissions:
+  contents: write
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      MEZO_PRIVATE_CHAT_ID: ${{ secrets.MEZO_PRIVATE_CHAT_ID }}
+      TELEGRAM_RELEASE_GROUP_ID: ${{ secrets.TELEGRAM_RELEASE_GROUP_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ github.token }}
+
+      - name: Send and verify sound
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          chat_id="${MEZO_PRIVATE_CHAT_ID:-${TELEGRAM_RELEASE_GROUP_ID:-}}"
+          [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]
+          [[ -n "$chat_id" ]]
+          command -v ffmpeg >/dev/null 2>&1 || { sudo apt-get update -qq; sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ffmpeg; }
+          ffmpeg -hide_banner -loglevel error -y -f lavfi -i 'sine=frequency=740:sample_rate=48000,volume=0.14,afade=t=out:st=1.0:d=0.4' -t 1.4 -c:a libmp3lame -b:a 128k /tmp/deadzone-proof.mp3
+          response="$(curl --silent --show-error --fail-with-body --connect-timeout 5 --max-time 20 \
+            -F "chat_id=$chat_id" \
+            -F 'title=DeadZone Sound Proof' \
+            -F 'performer=DeadZone System' \
+            -F 'caption=🔊 Sound path OK' \
+            -F 'audio=@/tmp/deadzone-proof.mp3;type=audio/mpeg' \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendAudio")"
+          RESPONSE="$response" python3 - <<'PY'
+          import json, os
+          data = json.loads(os.environ['RESPONSE'])
+          assert data.get('ok') is True, data.get('description') or data
+          print('telegram_sound_ok')
+          PY
+
+      - name: Remove proof workflow after confirmed delivery
+        shell: bash
+        run: |
+          git config user.name deadzone-bot
+          git config user.email deadzone-bot@users.noreply.github.com
+          git rm -f .github/workflows/_sound_smoke_proof.yml
+          git commit -m 'test: remove confirmed Telegram sound proof'
+          git push origin HEAD:main
