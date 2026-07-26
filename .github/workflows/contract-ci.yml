@@ -35,13 +35,14 @@ jobs:
           set -Eeuo pipefail
           workflows=(
             .github/workflows/MEZO_Lite.yml
+            .github/workflows/Lite_Test.yml
             .github/workflows/frameworkpatcher.yml
             .github/workflows/gamingplus.yml
           )
           for workflow in "${workflows[@]}"; do
             test -s "$workflow"
-            head -n 35 "$workflow" | grep -q 'request_id:'
-            if head -n 35 "$workflow" | grep -Eq 'builder_name:|builder_id:|rom_link:|input_url:|framework_url:|services_url:'; then
+            head -n 45 "$workflow" | grep -q 'request_id:'
+            if head -n 45 "$workflow" | grep -Eq 'builder_name:|builder_id:|rom_link:|input_url:|framework_url:|services_url:|telegram_user_id:'; then
               echo "Sensitive workflow_dispatch input found in $workflow" >&2
               exit 1
             fi
@@ -57,7 +58,7 @@ jobs:
             exit 1
           fi
 
-      - name: Verify private contract endpoint usage
+      - name: Verify canonical workflows use private contract resolution
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -67,3 +68,10 @@ jobs:
             grep -q 'X-DeadZone-Signature' ".github/workflows/$workflow"
             grep -q 'deadzone-result-${{ inputs.request_id }}' ".github/workflows/$workflow"
           done
+
+      - name: Verify Lite Test delegates to canonical Lite
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          grep -q 'uses: ./.github/workflows/MEZO_Lite.yml' .github/workflows/Lite_Test.yml
+          grep -q 'secrets: inherit' .github/workflows/Lite_Test.yml
