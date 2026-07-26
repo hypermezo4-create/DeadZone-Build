@@ -34,6 +34,10 @@ on:
       request_id:
         required: true
         type: string
+  push:
+    branches: [main]
+    paths:
+      - ".github/deadzone-lite-smoke.txt"
 
 permissions:
   contents: read
@@ -75,12 +79,21 @@ jobs:
         id: mode
         shell: bash
         env:
+          INPUT_EVENT_NAME: ${{ github.event_name }}
           INPUT_REQUEST_ID: ${{ inputs.request_id }}
           INPUT_ROM_LINK: ${{ inputs.rom_link }}
           INPUT_BUILDER_LABEL: ${{ inputs.builder_label }}
           INPUT_LANGUAGE: ${{ inputs.language }}
         run: |
           set -Eeuo pipefail
+
+          if [[ "$INPUT_EVENT_NAME" == "push" ]]; then
+            INPUT_REQUEST_ID=""
+            INPUT_ROM_LINK="$(tr -d '\r\n' < .github/deadzone-lite-smoke.txt)"
+            INPUT_BUILDER_LABEL="DeadZone Smoke Test"
+            INPUT_LANGUAGE="ar"
+          fi
+
           if [[ -n "${INPUT_REQUEST_ID:-}" ]]; then
             [[ "$INPUT_REQUEST_ID" =~ ^DZ-LT-[0-9]{8}-[0-9]{4}$ ]] || { echo "Invalid DeadZone Lite request ID" >&2; exit 1; }
             [[ -n "${BUILD_PROGRESS_SECRET:-}" ]] || { echo "Missing BUILD_PROGRESS_SECRET" >&2; exit 1; }
@@ -151,7 +164,8 @@ jobs:
 
       - name: Live — prepare Lite
         if: steps.mode.outputs.mode == 'bot'
-        run: bash scripts/emit_stage.sh preparing in_progress 0 "Preparing DeadZone Lite."
+        continue-on-error: true
+        run: bash scripts/emit_stage.sh preparing in_progress 0 "Preparing DeadZone Lite." || true
 
       - name: Validate private source configuration
         shell: bash
@@ -178,7 +192,8 @@ jobs:
 
       - name: Live — load Lite engine
         if: steps.mode.outputs.mode == 'bot'
-        run: bash scripts/emit_stage.sh loading_engine in_progress 1 "Loading DeadZone Lite."
+        continue-on-error: true
+        run: bash scripts/emit_stage.sh loading_engine in_progress 1 "Loading DeadZone Lite." || true
 
       - name: Load DeadZone Lite engine
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -193,7 +208,8 @@ jobs:
 
       - name: Live — prepare Lite tools
         if: steps.mode.outputs.mode == 'bot'
-        run: bash scripts/emit_stage.sh installing_tools in_progress 2 "Preparing Lite tools."
+        continue-on-error: true
+        run: bash scripts/emit_stage.sh installing_tools in_progress 2 "Preparing Lite tools." || true
 
       - name: Prepare Lite environment
         working-directory: engine
@@ -203,7 +219,7 @@ jobs:
           sudo timedatectl set-timezone Africa/Cairo
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            software-properties-common ca-certificates curl gnupg file git aria2 jq sshpass \
+            software-properties-common ca-certificates curl gnupg file git aria2 jq sshpass ffmpeg \
             python-is-python3 wget python3 python3-pip lz4 xz-utils brotli device-tree-compiler \
             zlib1g-dev gcc g++ libc6 libstdc++6 dialog libgtk-3-dev busybox zip unzip p7zip-full \
             zstd bc android-sdk-libsparse-utils golang-go rclone
@@ -228,19 +244,19 @@ jobs:
           export INPUT_URL="$rom"
 
           if [[ "${DEADZONE_CONTROLLED_BUILD:-0}" == "1" ]]; then
-            bash "$GITHUB_WORKSPACE/scripts/emit_stage.sh" building in_progress 3 "Building DeadZone Lite."
+            bash "$GITHUB_WORKSPACE/scripts/emit_stage.sh" building in_progress 3 "Building DeadZone Lite." || true
           fi
           sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash build.sh "$rom" 2>&1 | tee build_action.log
 
           if [[ "${DEADZONE_CONTROLLED_BUILD:-0}" == "1" ]]; then
-            bash "$GITHUB_WORKSPACE/scripts/emit_stage.sh" packaging in_progress 4 "Packaging DeadZone Lite."
+            bash "$GITHUB_WORKSPACE/scripts/emit_stage.sh" packaging in_progress 4 "Packaging DeadZone Lite." || true
           else
             python3 notify.py pack DeadZone_Lite "$rom" mezo-lite "$BUILDER_NAME" "" || true
           fi
           sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash packROM.sh 2>&1 | tee pack_action.log
 
           if [[ "${DEADZONE_CONTROLLED_BUILD:-0}" == "1" ]]; then
-            bash "$GITHUB_WORKSPACE/scripts/emit_stage.sh" preparing_upload in_progress 5 "Preparing Lite delivery."
+            bash "$GITHUB_WORKSPACE/scripts/emit_stage.sh" preparing_upload in_progress 5 "Preparing Lite delivery." || true
           fi
           base_dir="${RCLONE_UPLOAD_DIR%/}"
           if [[ "${DEADZONE_CONTROLLED_BUILD:-0}" == "1" ]]; then
@@ -251,14 +267,14 @@ jobs:
           sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash uploadROM.sh setup
 
           if [[ "${DEADZONE_CONTROLLED_BUILD:-0}" == "1" ]]; then
-            bash "$GITHUB_WORKSPACE/scripts/emit_stage.sh" uploading in_progress 6 "Uploading DeadZone Lite."
+            bash "$GITHUB_WORKSPACE/scripts/emit_stage.sh" uploading in_progress 6 "Uploading DeadZone Lite." || true
           else
             python3 notify.py upload DeadZone_Lite "$rom" mezo-lite "$BUILDER_NAME" "" || true
           fi
           sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" bash uploadROM.sh 2>&1 | tee upload_action.log
 
           if [[ "${DEADZONE_CONTROLLED_BUILD:-0}" == "1" ]]; then
-            bash "$GITHUB_WORKSPACE/scripts/emit_stage.sh" finalizing in_progress 7 "Final verification."
+            bash "$GITHUB_WORKSPACE/scripts/emit_stage.sh" finalizing in_progress 7 "Final verification." || true
           fi
 
       - name: Create result contract
@@ -271,35 +287,54 @@ jobs:
           from datetime import datetime, timezone
           from pathlib import Path
           from urllib.parse import urlsplit
+
           def first(paths):
               for path in paths:
                   p = Path(path)
                   if p.is_file():
                       value = p.read_text(encoding="utf-8", errors="replace").strip()
-                      if value: return value
+                      if value:
+                          return value
               return ""
+
           name = first(["bin/runtime/info/output_zip.txt","bin/runtime/info/output_file.txt","bin/ddevice/output_zip.txt"])
           link = first(["bin/runtime/info/drive_link.txt","bin/runtime/info/upload_link.txt","bin/ddevice/drive_link.txt"])
           output_path = first(["bin/runtime/info/output_path.txt"])
           artifact = Path(output_path) if output_path else Path("out") / name
-          if not name or not artifact.is_file() or artifact.stat().st_size <= 0: raise SystemExit("Lite output archive is missing")
+          if not name or not artifact.is_file() or artifact.stat().st_size <= 0:
+              raise SystemExit("Lite output archive is missing")
           parsed = urlsplit(link)
-          if parsed.scheme != "https" or not parsed.hostname: raise SystemExit("Lite delivery link is invalid")
-          result = {"schema_version":"1.0","request_id":os.environ["REQUEST_ID"],"project":"lite","status":"success","provider":"google_drive","url":link,"file_name":artifact.name,"sha256":hashlib.sha256(artifact.read_bytes()).hexdigest(),"size":artifact.stat().st_size,"completed_at":datetime.now(timezone.utc).isoformat()}
+          if parsed.scheme != "https" or not parsed.hostname:
+              raise SystemExit("Lite delivery link is invalid")
+          result = {
+              "schema_version":"1.0",
+              "request_id":os.environ["REQUEST_ID"],
+              "project":"lite",
+              "status":"success",
+              "provider":"google_drive",
+              "url":link,
+              "file_name":artifact.name,
+              "sha256":hashlib.sha256(artifact.read_bytes()).hexdigest(),
+              "size":artifact.stat().st_size,
+              "completed_at":datetime.now(timezone.utc).isoformat(),
+          }
           Path("../deadzone-result.json").write_text(json.dumps(result, sort_keys=True, indent=2), encoding="utf-8")
           PY
 
       - name: Live — Lite verified
         if: success() && steps.mode.outputs.mode == 'bot'
-        run: bash scripts/emit_stage.sh finalizing success 8 "DeadZone Lite completed."
+        continue-on-error: true
+        run: bash scripts/emit_stage.sh finalizing success 8 "DeadZone Lite completed." || true
 
       - name: Live — Lite failed
         if: failure() && steps.mode.outputs.mode == 'bot'
-        run: bash scripts/emit_stage.sh "${DZ_CURRENT_STAGE_KEY:-preparing}" failed "${DZ_COMPLETED_STAGES:-0}" "DeadZone Lite stopped safely."
+        continue-on-error: true
+        run: bash scripts/emit_stage.sh "${DZ_CURRENT_STAGE_KEY:-preparing}" failed "${DZ_COMPLETED_STAGES:-0}" "DeadZone Lite stopped safely." || true
 
       - name: Manual — Lite verified
         if: success() && steps.mode.outputs.mode == 'manual'
         working-directory: engine
+        continue-on-error: true
         run: python3 notify.py success DeadZone_Lite "" mezo-lite "${BUILDER_NAME:-${GITHUB_ACTOR}}" ""
 
       - name: Manual — Lite failed
