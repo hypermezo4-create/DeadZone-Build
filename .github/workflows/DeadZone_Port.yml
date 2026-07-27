@@ -171,16 +171,60 @@ jobs:
         continue-on-error: true
         run: bash scripts/emit_stage.sh preparing in_progress 0 "Preparing the DeadZone Port dual-ROM pipeline." || true
 
-      - name: Validate private engine configuration
+      - name: Resolve private Port engine access
+        id: engine_auth
         shell: bash
         env:
-          PORT_ENGINE_REPOSITORY: ${{ secrets.PORT_ENGINE_REPOSITORY }}
-          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_TOKEN }}
+          RAW_PORT_ENGINE_REPOSITORY: ${{ secrets.PORT_ENGINE_REPOSITORY }}
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          GH_TOKEN_FALLBACK: ${{ secrets.GH_TOKEN }}
         run: |
           set -Eeuo pipefail
-          for key in PORT_ENGINE_REPOSITORY PRIVATE_REPO_TOKEN RCLONE_CONFIG_BASE64 RCLONE_REMOTE_NAME RCLONE_UPLOAD_DIR; do
+          for key in RAW_PORT_ENGINE_REPOSITORY RCLONE_CONFIG_BASE64 RCLONE_REMOTE_NAME RCLONE_UPLOAD_DIR; do
             [[ -n "${!key:-}" ]] || { echo "Missing required configuration: $key" >&2; exit 1; }
           done
+          [[ -n "${PRIVATE_REPO_TOKEN:-}" || -n "${GH_TOKEN_FALLBACK:-}" ]] || {
+            echo "Missing private engine credential: PRIVATE_REPO_TOKEN or GH_TOKEN" >&2
+            exit 1
+          }
+
+          repo="$(printf '%s' "$RAW_PORT_ENGINE_REPOSITORY" | tr -d '\r\n')"
+          repo="${repo#https://github.com/}"
+          repo="${repo#http://github.com/}"
+          repo="${repo#github.com/}"
+          repo="${repo%/}"
+          repo="${repo%.git}"
+          repo="${repo%/}"
+          [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || {
+            echo "PORT_ENGINE_REPOSITORY must resolve to owner/repository" >&2
+            exit 1
+          }
+          echo "::add-mask::$repo"
+
+          can_read_engine() {
+            local token="$1" auth
+            [[ -n "$token" ]] || return 1
+            auth="$(printf 'x-access-token:%s' "$token" | base64 -w0)"
+            GIT_TERMINAL_PROMPT=0 git \
+              -c credential.helper= \
+              -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" \
+              ls-remote --exit-code "https://github.com/${repo}.git" refs/heads/main >/dev/null 2>&1
+          }
+
+          if can_read_engine "$PRIVATE_REPO_TOKEN"; then
+            token_source=private
+          elif can_read_engine "$GH_TOKEN_FALLBACK"; then
+            token_source=gh
+          else
+            echo "Configured private-repository credentials cannot read the Port engine main branch" >&2
+            exit 1
+          fi
+
+          {
+            echo "repository=$repo"
+            echo "token_source=$token_source"
+          } >> "$GITHUB_OUTPUT"
+          echo "Private Port engine access verified"
 
       - name: Maximize hosted runner space
         uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
@@ -198,10 +242,23 @@ jobs:
         run: bash scripts/emit_stage.sh loading_engine in_progress 1 "Loading the DeadZone Port engine." || true
 
       - name: Checkout private DeadZone Port engine
+        if: steps.engine_auth.outputs.token_source == 'private'
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          repository: ${{ secrets.PORT_ENGINE_REPOSITORY }}
-          token: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_TOKEN }}
+          repository: ${{ steps.engine_auth.outputs.repository }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          ref: main
+          path: engine
+          fetch-depth: 1
+          lfs: true
+          persist-credentials: false
+
+      - name: Checkout private DeadZone Port engine with fallback credential
+        if: steps.engine_auth.outputs.token_source == 'gh'
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ${{ steps.engine_auth.outputs.repository }}
+          token: ${{ secrets.GH_TOKEN }}
           ref: main
           path: engine
           fetch-depth: 1
