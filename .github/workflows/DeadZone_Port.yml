@@ -1,0 +1,428 @@
+name: "🛠️ DeadZone Port"
+
+run-name: "DeadZone Port • ${{ inputs.request_id || github.actor }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: "Bot request ID. Leave empty for a manual GitHub build."
+        required: false
+        type: string
+      stock_rom_link:
+        description: "Stock ROM HTTPS link for a manual Port build."
+        required: false
+        type: string
+      port_rom_link:
+        description: "Donor / Port ROM HTTPS link for a manual Port build."
+        required: false
+        type: string
+      builder_label:
+        description: "Optional builder label for a manual build."
+        required: false
+        type: string
+      language:
+        description: "Build language for a manual GitHub run."
+        required: false
+        default: "en"
+        type: choice
+        options: ["en", "ar"]
+  workflow_call:
+    inputs:
+      request_id:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deadzone-port-build-queue
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build DeadZone Port privately
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      CONTROL_BOT_CONTRACT_URL: https://deadzone-mezo-v3-20260726.fly.dev/contract/resolve
+      CONTROL_BOT_TELEMETRY_URL: https://deadzone-mezo-v3-20260726.fly.dev/telemetry
+      BUILD_PROGRESS_SECRET: ${{ secrets.BUILD_PROGRESS_SECRET }}
+      RCLONE_CONFIG_BASE64: ${{ secrets.RCLONE_CONFIG_BASE64 }}
+      RCLONE_REMOTE_NAME: ${{ secrets.RCLONE_REMOTE_NAME }}
+      RCLONE_UPLOAD_DIR: ${{ secrets.RCLONE_UPLOAD_DIR }}
+      RCLONE_PUBLIC_LINK_BASE: ${{ secrets.RCLONE_PUBLIC_LINK_BASE }}
+      DEADZONE_PROJECT: port
+
+    steps:
+      - name: Checkout DeadZone launcher
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Resolve build mode and inputs
+        id: mode
+        shell: bash
+        env:
+          INPUT_REQUEST_ID: ${{ inputs.request_id }}
+          INPUT_STOCK_ROM_LINK: ${{ inputs.stock_rom_link }}
+          INPUT_PORT_ROM_LINK: ${{ inputs.port_rom_link }}
+          INPUT_BUILDER_LABEL: ${{ inputs.builder_label }}
+          INPUT_LANGUAGE: ${{ inputs.language }}
+        run: |
+          set -Eeuo pipefail
+          if [[ -n "${INPUT_REQUEST_ID:-}" ]]; then
+            [[ "$INPUT_REQUEST_ID" =~ ^DZ-PT-[0-9]{8}-[0-9]{4}$ ]] || {
+              echo "Invalid DeadZone Port request ID" >&2
+              exit 1
+            }
+            [[ -n "${BUILD_PROGRESS_SECRET:-}" ]] || { echo "Missing BUILD_PROGRESS_SECRET" >&2; exit 1; }
+            export REQUEST_ID="$INPUT_REQUEST_ID"
+            python3 - <<'PY'
+          import base64
+          import hashlib
+          import hmac
+          import json
+          import os
+          import re
+          import urllib.request
+          from datetime import datetime, timezone
+
+          secret = os.environ["BUILD_PROGRESS_SECRET"]
+          request_id = os.environ["REQUEST_ID"]
+          payload = {
+              "schema_version": "1.0",
+              "request_id": request_id,
+              "project": "port",
+              "timestamp": datetime.now(timezone.utc).isoformat(),
+          }
+          body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+          signature = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+          req = urllib.request.Request(
+              os.environ["CONTROL_BOT_CONTRACT_URL"],
+              data=body,
+              method="POST",
+              headers={"Content-Type": "application/json", "X-DeadZone-Signature": signature},
+          )
+          with urllib.request.urlopen(req, timeout=20) as response:
+              response_body = response.read()
+              response_signature = response.headers.get("X-DeadZone-Signature", "")
+          expected = hmac.new(secret.encode(), response_body, hashlib.sha256).hexdigest()
+          if not hmac.compare_digest(expected, response_signature):
+              raise SystemExit("Invalid control response signature")
+
+          contract = json.loads(response_body)
+          if contract.get("request_id") != request_id or contract.get("project") != "port":
+              raise SystemExit("Private contract mismatch")
+
+          port_url = str((contract.get("source") or {}).get("url") or "")
+          options = contract.get("options") if isinstance(contract.get("options"), dict) else {}
+          stock_url = str(options.get("stock_rom_url") or "")
+          builder = contract.get("builder") or {}
+          builder_id = int(builder.get("telegram_user_id") or 0)
+          builder_slug = str(builder.get("slug") or "")
+          builder_name = str(builder.get("display_name") or builder.get("username") or builder_slug or "DeadZone Builder")
+          language = "ar" if str(contract.get("language") or "").lower() == "ar" else "en"
+
+          if not stock_url.startswith("https://") or not port_url.startswith("https://"):
+              raise SystemExit("DeadZone Port requires both Stock and Port HTTPS sources")
+          if builder_id <= 0 or not re.fullmatch(r"[a-z0-9_.-]{1,48}", builder_slug):
+              raise SystemExit("Builder identity is invalid")
+
+          print(f"::add-mask::{stock_url}")
+          print(f"::add-mask::{port_url}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              out.write(f"REQUEST_ID={request_id}\n")
+              out.write("STOCK_ROM_URL_B64=" + base64.b64encode(stock_url.encode()).decode() + "\n")
+              out.write("PORT_ROM_URL_B64=" + base64.b64encode(port_url.encode()).decode() + "\n")
+              out.write(f"BUILDER_ID={builder_id}\nBUILDER_SLUG={builder_slug}\n")
+              out.write("BUILDER_NAME_B64=" + base64.b64encode(builder_name.encode()).decode() + "\n")
+              out.write(f"DEADZONE_LANGUAGE={language}\n")
+              out.write("REQUEST_SOURCE=telegram\nDEADZONE_CONTROLLED_BUILD=1\n")
+          PY
+            echo "mode=bot" >> "$GITHUB_OUTPUT"
+          else
+            [[ "${INPUT_STOCK_ROM_LINK:-}" == https://* ]] || { echo "Manual Port build requires stock_rom_link" >&2; exit 1; }
+            [[ "${INPUT_PORT_ROM_LINK:-}" == https://* ]] || { echo "Manual Port build requires port_rom_link" >&2; exit 1; }
+            echo "::add-mask::$INPUT_STOCK_ROM_LINK"
+            echo "::add-mask::$INPUT_PORT_ROM_LINK"
+            builder="${INPUT_BUILDER_LABEL:-${GITHUB_ACTOR}}"
+            language="${INPUT_LANGUAGE:-en}"
+            [[ "$language" == "ar" ]] || language="en"
+            {
+              echo "REQUEST_ID=DZ-PT-DIRECT-${GITHUB_RUN_ID}"
+              echo "STOCK_ROM_URL_B64=$(printf '%s' "$INPUT_STOCK_ROM_LINK" | base64 -w0)"
+              echo "PORT_ROM_URL_B64=$(printf '%s' "$INPUT_PORT_ROM_LINK" | base64 -w0)"
+              echo "BUILDER_ID=0"
+              echo "BUILDER_SLUG=github"
+              echo "BUILDER_NAME_B64=$(printf '%s' "$builder" | base64 -w0)"
+              echo "DEADZONE_LANGUAGE=$language"
+              echo "REQUEST_SOURCE=github"
+              echo "DEADZONE_CONTROLLED_BUILD=0"
+            } >> "$GITHUB_ENV"
+            echo "mode=manual" >> "$GITHUB_OUTPUT"
+          fi
+          echo "BUILD_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+
+      - name: Live — prepare Port
+        if: steps.mode.outputs.mode == 'bot'
+        continue-on-error: true
+        run: bash scripts/emit_stage.sh preparing in_progress 0 "Preparing the DeadZone Port dual-ROM pipeline." || true
+
+      - name: Validate private engine configuration
+        shell: bash
+        env:
+          PORT_ENGINE_REPOSITORY: ${{ secrets.PORT_ENGINE_REPOSITORY }}
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          for key in PORT_ENGINE_REPOSITORY PRIVATE_REPO_TOKEN RCLONE_CONFIG_BASE64 RCLONE_REMOTE_NAME RCLONE_UPLOAD_DIR; do
+            [[ -n "${!key:-}" ]] || { echo "Missing required configuration: $key" >&2; exit 1; }
+          done
+
+      - name: Maximize hosted runner space
+        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
+        with:
+          swap-size-mb: 1024
+          root-reserve-mb: 512
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-docker-images: "true"
+
+      - name: Live — load Port engine
+        if: steps.mode.outputs.mode == 'bot'
+        continue-on-error: true
+        run: bash scripts/emit_stage.sh loading_engine in_progress 1 "Loading the DeadZone Port engine." || true
+
+      - name: Checkout private DeadZone Port engine
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ${{ secrets.PORT_ENGINE_REPOSITORY }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_TOKEN }}
+          ref: main
+          path: engine
+          fetch-depth: 1
+          lfs: true
+          persist-credentials: false
+
+      - name: Set up OpenJDK 17
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Initialize and validate Port engine
+        working-directory: engine
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export WORK_DIR="$PWD"
+          source bin/core/runtime.sh
+          runtime_init
+          echo "DEADZONE_RUNTIME_PREINITIALIZED=1" >> "$GITHUB_ENV"
+          bash bin/core/ci/validate.sh
+          bash bin/core/ci/smoke-port-merge.sh
+
+      - name: Live — prepare Port toolchain
+        if: steps.mode.outputs.mode == 'bot'
+        continue-on-error: true
+        run: bash scripts/emit_stage.sh installing_tools in_progress 2 "Preparing the Port extraction, patching and Super toolchain." || true
+
+      - name: Install Port dependencies
+        working-directory: engine
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash bin/core/ci/setup.sh 2>&1 | tee build_action.log
+          find . -type f -name '*.sh' -exec chmod +x {} +
+          chmod +x build.sh packROM.sh uploadROM.sh
+          bash -n build.sh
+          bash -n packROM.sh
+          bash -n uploadROM.sh
+
+      - name: Live — build Port ROM
+        if: steps.mode.outputs.mode == 'bot'
+        continue-on-error: true
+        run: bash scripts/emit_stage.sh building in_progress 3 "Merging Stock and donor ROMs and applying DeadZone Port modifications." || true
+
+      - name: Build DeadZone Port
+        working-directory: engine
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          stock_rom="$(printf '%s' "$STOCK_ROM_URL_B64" | base64 --decode)"
+          port_rom="$(printf '%s' "$PORT_ROM_URL_B64" | base64 --decode)"
+          export BUILDER_NAME="$(printf '%s' "$BUILDER_NAME_B64" | base64 --decode)"
+          export STOCK_ROM_URL="$stock_rom"
+          export PORT_ROM_URL="$port_rom"
+          export INPUT_URL="$port_rom"
+          sudo -E env \
+            "PATH=$PATH" \
+            "HOME=$HOME" \
+            "GITHUB_ENV=$GITHUB_ENV" \
+            "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \
+            "STOCK_ROM_URL=$STOCK_ROM_URL" \
+            "PORT_ROM_URL=$PORT_ROM_URL" \
+            "INPUT_URL=$INPUT_URL" \
+            "BUILDER_NAME=$BUILDER_NAME" \
+            "BUILDER_ID=${BUILDER_ID:-0}" \
+            "BUILDER_SLUG=${BUILDER_SLUG:-github}" \
+            "DEADZONE_LANGUAGE=${DEADZONE_LANGUAGE:-en}" \
+            "DEADZONE_CONTROLLED_BUILD=${DEADZONE_CONTROLLED_BUILD:-0}" \
+            "DEADZONE_RUNTIME_PREINITIALIZED=1" \
+            bash build.sh "$stock_rom" "$port_rom" 2>&1 | tee -a build_action.log
+
+      - name: Live — package Port ROM
+        if: steps.mode.outputs.mode == 'bot'
+        continue-on-error: true
+        run: bash scripts/emit_stage.sh packaging in_progress 4 "Repacking Port partitions and validating the generated Super image." || true
+
+      - name: Package DeadZone Port
+        working-directory: engine
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo -E env "PATH=$PATH" "HOME=$HOME" "GITHUB_ENV=$GITHUB_ENV" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \
+            bash packROM.sh 2>&1 | tee -a build_action.log
+          [[ -s build/baserom/images/super.img ]] || { echo "super.img is missing after Port packaging" >&2; exit 1; }
+
+      - name: Live — verify Port package
+        if: steps.mode.outputs.mode == 'bot'
+        continue-on-error: true
+        run: bash scripts/emit_stage.sh preparing_upload in_progress 5 "Verifying the Port package before private delivery." || true
+
+      - name: Live — deliver Port ROM
+        if: steps.mode.outputs.mode == 'bot'
+        continue-on-error: true
+        run: bash scripts/emit_stage.sh uploading in_progress 6 "Uploading the verified DeadZone Port package to DeadZone Cloud." || true
+
+      - name: Upload and verify private delivery
+        working-directory: engine
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          base_dir="${RCLONE_UPLOAD_DIR%/}"
+          if [[ "${DEADZONE_CONTROLLED_BUILD:-0}" == "1" ]]; then
+            export RCLONE_UPLOAD_DIR="${base_dir}/port/${BUILDER_SLUG}_${BUILDER_ID}/${REQUEST_ID}"
+          else
+            export RCLONE_UPLOAD_DIR="${base_dir}/port/direct/${GITHUB_ACTOR}/${GITHUB_RUN_ID}"
+          fi
+          sudo -E env \
+            "PATH=$PATH" \
+            "HOME=$HOME" \
+            "GITHUB_ENV=$GITHUB_ENV" \
+            "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \
+            "RCLONE_CONFIG_BASE64=$RCLONE_CONFIG_BASE64" \
+            "RCLONE_REMOTE_NAME=$RCLONE_REMOTE_NAME" \
+            "RCLONE_UPLOAD_DIR=$RCLONE_UPLOAD_DIR" \
+            "RCLONE_PUBLIC_LINK_BASE=${RCLONE_PUBLIC_LINK_BASE:-}" \
+            "DEADZONE_CONTROLLED_BUILD=${DEADZONE_CONTROLLED_BUILD:-0}" \
+            "REQUEST_ID=$REQUEST_ID" \
+            "BUILDER_ID=${BUILDER_ID:-0}" \
+            "BUILDER_SLUG=${BUILDER_SLUG:-github}" \
+            bash uploadROM.sh setup 2>&1 | tee -a build_action.log
+          sudo -E env \
+            "PATH=$PATH" \
+            "HOME=$HOME" \
+            "GITHUB_ENV=$GITHUB_ENV" \
+            "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \
+            "RCLONE_CONFIG_BASE64=$RCLONE_CONFIG_BASE64" \
+            "RCLONE_REMOTE_NAME=$RCLONE_REMOTE_NAME" \
+            "RCLONE_UPLOAD_DIR=$RCLONE_UPLOAD_DIR" \
+            "RCLONE_PUBLIC_LINK_BASE=${RCLONE_PUBLIC_LINK_BASE:-}" \
+            "DEADZONE_CONTROLLED_BUILD=${DEADZONE_CONTROLLED_BUILD:-0}" \
+            "REQUEST_ID=$REQUEST_ID" \
+            "BUILDER_ID=${BUILDER_ID:-0}" \
+            "BUILDER_SLUG=${BUILDER_SLUG:-github}" \
+            bash uploadROM.sh 2>&1 | tee -a build_action.log
+
+      - name: Live — finalize Port
+        if: steps.mode.outputs.mode == 'bot'
+        continue-on-error: true
+        run: bash scripts/emit_stage.sh finalizing in_progress 7 "Final integrity verification for DeadZone Port." || true
+
+      - name: Create verified DeadZone result contract
+        working-directory: engine
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+          from urllib.parse import urlsplit
+
+          def first(paths):
+              for raw in paths:
+                  path = Path(raw)
+                  if path.is_file():
+                      value = path.read_text(encoding="utf-8", errors="replace").strip()
+                      if value:
+                          return value
+              return ""
+
+          name = first(["bin/runtime/info/output_zip.txt", "bin/runtime/info/output_file.txt"])
+          link = first(["bin/runtime/info/drive_link.txt", "bin/runtime/info/upload_link.txt"])
+          output_path = first(["bin/runtime/info/output_path.txt"])
+          artifact = Path(output_path) if output_path else Path("out") / name
+          if not name or not artifact.is_file() or artifact.stat().st_size <= 0:
+              raise SystemExit("DeadZone Port output archive is missing")
+          parsed = urlsplit(link)
+          if parsed.scheme != "https" or not parsed.hostname:
+              raise SystemExit("DeadZone Port delivery link is invalid")
+
+          result = {
+              "schema_version": "1.0",
+              "request_id": os.environ["REQUEST_ID"],
+              "project": "port",
+              "status": "success",
+              "provider": "google_drive",
+              "url": link,
+              "file_name": artifact.name,
+              "size": artifact.stat().st_size,
+              "completed_at": datetime.now(timezone.utc).isoformat(),
+          }
+          Path("../deadzone-result.json").write_text(
+              json.dumps(result, sort_keys=True, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Live — Port verified
+        if: success() && steps.mode.outputs.mode == 'bot'
+        continue-on-error: true
+        run: bash scripts/emit_stage.sh finalizing success 8 "DeadZone Port completed." || true
+
+      - name: Live — Port failed
+        if: failure() && steps.mode.outputs.mode == 'bot'
+        continue-on-error: true
+        run: bash scripts/emit_stage.sh "${DZ_CURRENT_STAGE_KEY:-preparing}" failed "${DZ_COMPLETED_STAGES:-0}" "DeadZone Port stopped safely." || true
+
+      - name: Expose verified result
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: deadzone-result-${{ env.REQUEST_ID }}
+          path: deadzone-result.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload private Port diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: deadzone-port-diagnostics-${{ env.REQUEST_ID }}
+          path: |
+            engine/build_action.log
+            engine/bin/runtime/logs/
+            engine/bin/runtime/reports/
+          if-no-files-found: warn
+          retention-days: 3
+
+      - name: Remove temporary credentials
+        if: always()
+        shell: bash
+        run: rm -f -- engine/rclone.conf engine/bin/runtime/config/rclone.conf
