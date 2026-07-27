@@ -2,7 +2,7 @@
 set -uo pipefail
 
 # Live progress is observability only. Nothing in this script is allowed to
-# stop the actual ROM build, even when contract/telemetry state is missing.
+# stop the actual build, even when contract/telemetry state is missing.
 stage_key="${1:-}"
 stage_state="${2:-}"
 completed_stages="${3:-0}"
@@ -26,8 +26,9 @@ fi
 repo_root="$(cd "$script_dir/.." 2>/dev/null && pwd || true)"
 stage_started_at="${DZ_STAGE_STARTED_AT:-${BUILD_STARTED_AT:-}}"
 request_id="${REQUEST_ID:-}"
-sound_pid_file="${RUNNER_TEMP:-/tmp}/deadzone-lite-sound-${request_id:-build}.pid"
-sound_log_file="${RUNNER_TEMP:-/tmp}/deadzone-lite-sound-${request_id:-build}.log"
+project="${DEADZONE_PROJECT:-lite}"
+sound_pid_file="${RUNNER_TEMP:-/tmp}/deadzone-${project}-sound-${request_id:-build}.pid"
+sound_log_file="${RUNNER_TEMP:-/tmp}/deadzone-${project}-sound-${request_id:-build}.log"
 
 stop_sound_reminder() {
   [[ -f "$sound_pid_file" ]] || return 0
@@ -41,6 +42,10 @@ stop_sound_reminder() {
 }
 
 start_sound_reminder() {
+  # FrameworkPatcher and future projects use the real VIBE bank owned by the
+  # Control Bot. The legacy runner-generated cue remains Lite-only so projects
+  # never receive duplicate/noisy audio from presentation telemetry.
+  [[ "$project" == "lite" ]] || return 0
   [[ "${DEADZONE_CONTROLLED_BUILD:-0}" == "1" ]] || return 0
   [[ -f "$script_dir/build_sound_reminder.sh" ]] || return 0
   [[ -x "$script_dir/build_sound_reminder.sh" ]] \
@@ -48,11 +53,7 @@ start_sound_reminder() {
     || return 0
   [[ -f "$sound_pid_file" ]] && return 0
 
-  # Prove the Telegram audio path synchronously so failures are visible in the
-  # workflow log instead of disappearing inside a detached process.
   bash "$script_dir/build_sound_reminder.sh" once || true
-
-  # Later reminders remain detached and non-blocking.
   nohup bash "$script_dir/build_sound_reminder.sh" loop >"$sound_log_file" 2>&1 &
   printf '%s\n' "$!" > "$sound_pid_file" 2>/dev/null || true
 }
@@ -92,10 +93,10 @@ else
   printf '%s\n' '[DeadZone System] live telemetry skipped: request state unavailable.' >&2
 fi
 
-# build.sh owns Start -> Download -> Extract -> Build so the visible progress
-# never jumps backwards. The launcher only bridges the later stages to the
-# same Lite message after build.sh returns.
-if [[ "${DEADZONE_CONTROLLED_BUILD:-0}" == "1" \
+# Lite's engine owns its rich start/download/extract/build renderer. The public
+# launcher bridges only the later Lite stages to that exact same message.
+if [[ "$project" == "lite" \
+   && "${DEADZONE_CONTROLLED_BUILD:-0}" == "1" \
    && -n "$repo_root" \
    && -f "$repo_root/engine/notify.py" ]]; then
   notify_stage=""
