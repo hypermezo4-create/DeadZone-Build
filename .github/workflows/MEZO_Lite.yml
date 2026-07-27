@@ -270,7 +270,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           python3 - <<'PY'
-          import hashlib, json, os
+          import json, os
           from datetime import datetime, timezone
           from pathlib import Path
           from urllib.parse import urlsplit
@@ -301,7 +301,6 @@ jobs:
               "provider":"google_drive",
               "url":link,
               "file_name":artifact.name,
-              "sha256":hashlib.sha256(artifact.read_bytes()).hexdigest(),
               "size":artifact.stat().st_size,
               "completed_at":datetime.now(timezone.utc).isoformat(),
           }
