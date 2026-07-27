@@ -1,0 +1,38 @@
+name: Temporary restore GamingPlus launcher
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/_tmp_restore_gamingplus.yml
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ github.token }}
+          fetch-depth: 0
+      - name: Restore private-contract GamingPlus workflow
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git show ef5ed7aa34d8b74ec4a367d7b610929ccb1dd29f:.github/workflows/gamingplus.yml > .github/workflows/gamingplus.yml
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('.github/workflows/gamingplus.yml')
+          s = p.read_text(encoding='utf-8')
+          s = s.replace('name: DeadZone GamingPlus Xiaomi Build', 'name: "🎮 DeadZone GamingPlus"', 1)
+          s = s.replace('run-name: "DeadZone GamingPlus  ${{ inputs.request_id }}"', 'run-name: "DeadZone GamingPlus • ${{ inputs.request_id }}"', 1)
+          p.write_text(s, encoding='utf-8')
+          PY
+          git config user.name deadzone-bot
+          git config user.email deadzone-bot@users.noreply.github.com
+          git rm .github/workflows/_tmp_restore_gamingplus.yml
+          git add .github/workflows/gamingplus.yml
+          git commit -m 'workflow: restore DeadZone GamingPlus private launcher'
+          git push origin HEAD:main
