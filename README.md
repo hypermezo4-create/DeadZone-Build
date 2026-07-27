@@ -48,13 +48,15 @@ Telegram / GitHub
 
 | Edition | Purpose | Input model | Launcher status |
 |---|---|---|---|
-| ⚡ **DeadZone - Lite** | Main Xiaomi MIUI / HyperOS build pipeline with automatic detection, extraction, modifications, repacking and delivery. | One ROM source | ✅ Production |
+| ⚡ **DeadZone Lite** | Main Xiaomi MIUI / HyperOS pipeline with automatic detection, extraction, modifications, repacking and delivery. | One ROM source | ✅ Production |
 | 🎮 **DeadZone GamingPlus** | Gaming-focused build path with performance-oriented modifications and the DeadZone delivery contract. | One ROM source | ✅ Production |
-| 🥷 **DeadZone Ninja** | Framework / JAR modification system for Android framework features and targeted patch sets. | Android + device + ROM metadata + selected JAR inputs | ✅ Production |
-| 🛠️ **DeadZone Port** | Dual-ROM porting engine that combines a target Stock ROM with a donor Port ROM, then rebuilds and validates the final dynamic-partition package. | **Stock ROM + Port ROM** | ✅ New launcher workflow |
+| 🥷 **DeadZone Ninja** | Dedicated DeadZone edition registered in the project catalog for its own private engine and future launcher contract. | Engine-specific | 🧪 Activation pending |
+| 🛠️ **DeadZone Port** | Dual-ROM porting engine that combines a target Stock ROM with a donor Port ROM, then rebuilds and validates the final dynamic-partition package. | **Stock ROM + Port ROM** | ✅ Launcher ready |
 | 👑 **DeadZone Legend** | Reserved DeadZone edition for the next build profile and feature set. | Defined when the engine contract is finalized | 🧪 Planned |
 
-### ⚡ DeadZone - Lite
+A separate **FrameworkPatcher** compatibility workflow remains active for framework/JAR feature builds while DeadZone Ninja keeps its own edition identity.
+
+### ⚡ DeadZone Lite
 
 Lite is the standard DeadZone ROM engine. It receives one supported ROM package and runs the full build journey:
 
@@ -62,13 +64,19 @@ Lite is the standard DeadZone ROM engine. It receives one supported ROM package 
 ROM → Detect → Extract → Modify → Repack → Upload → Verify
 ```
 
-Canonical workflow:
+Control Bot entry workflow:
+
+```text
+.github/workflows/MEZO_Lite_v11.yml
+```
+
+Reusable / manual-capable Lite workflow:
 
 ```text
 .github/workflows/MEZO_Lite.yml
 ```
 
-It supports both Control Bot requests and manual GitHub execution.
+The v1.1 entry preserves the current Control Bot release contract while reusing the maintained Lite build pipeline underneath.
 
 ### 🎮 DeadZone GamingPlus
 
@@ -82,15 +90,9 @@ Canonical workflow:
 
 ### 🥷 DeadZone Ninja
 
-Ninja is the user-facing identity for the FrameworkPatcher build path. It handles Android-version-aware framework modifications and can accept the JAR inputs required by each selected feature.
+Ninja is a standalone DeadZone edition with its own private engine identity. It is already represented in the DeadZone project catalog, but its dedicated launcher workflow is intentionally not marked Production until its final input model and result contract are activated.
 
-Canonical workflow:
-
-```text
-.github/workflows/frameworkpatcher.yml
-```
-
-The engine remains compatible with the existing FrameworkPatcher contract while the DeadZone product identity is **DeadZone Ninja**.
+This keeps Ninja independent from the existing FrameworkPatcher compatibility route instead of silently treating both products as the same engine.
 
 ### 🛠️ DeadZone Port
 
@@ -121,9 +123,23 @@ The workflow follows the real Port engine contract:
 
 Manual runs are available from **Actions → DeadZone Port** and require both `stock_rom_link` and `port_rom_link`.
 
+The workflow also contains the signed request-contract path for the future Control Bot dual-ROM handoff. Port remains disabled in the bot's New Build menu until the bot collects and stores both URLs safely.
+
 ### 👑 DeadZone Legend
 
 Legend is part of the DeadZone edition catalog but does not have an active production launcher yet. Its workflow will be added only when the engine inputs, result contract and validation requirements are finalized.
+
+---
+
+## 🧩 FrameworkPatcher Compatibility Route
+
+FrameworkPatcher remains an active technical build route for Android framework/JAR modifications.
+
+```text
+.github/workflows/frameworkpatcher.yml
+```
+
+It supports Android version, device/ROM metadata, feature selection and the JAR inputs needed by each patch set. It is documented separately from DeadZone Ninja so product identity and implementation routing stay explicit.
 
 ---
 
@@ -161,7 +177,7 @@ sequenceDiagram
 
 ## 🚀 Manual GitHub Builds
 
-Workflows that expose manual inputs can also run directly from the **Actions** tab.
+Workflows that expose manual inputs can run directly from the **Actions** tab.
 
 | Workflow | Manual input |
 |---|---|
@@ -283,6 +299,7 @@ Verified
 DeadZone-Build/
 ├── .github/
 │   └── workflows/
+│       ├── MEZO_Lite_v11.yml
 │       ├── MEZO_Lite.yml
 │       ├── gamingplus.yml
 │       ├── frameworkpatcher.yml
@@ -293,7 +310,7 @@ DeadZone-Build/
 └── README.md
 ```
 
-Legend will receive its own workflow when its engine is ready for the same production contract.
+Ninja and Legend receive dedicated launcher workflows only when their production contracts are ready.
 
 ---
 
