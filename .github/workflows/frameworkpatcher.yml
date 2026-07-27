@@ -237,7 +237,8 @@ jobs:
               elif feature == "cn_notification_fix": required.add("miui_services_url")
               elif feature == "disable_secure_flag": required |= {"services_url","miui_services_url"}
               elif feature == "add_gboard": required |= {"miui_services_url","miui_framework_url"}
-          allowed_hosts = {"drive.google.com","docs.google.com","github.com","raw.githubusercontent.com","objects.githubusercontent.com"}
+          control_host = "deadzone-mezo-v3-20260726.fly.dev"
+          allowed_hosts = {"drive.google.com","docs.google.com","github.com","raw.githubusercontent.com","objects.githubusercontent.com",control_host}
           for key in ("framework_url","services_url","miui_services_url","miui_framework_url"):
               url = str(urls.get(key) or "")
               file_id = str(telegram_files.get(key) or "")
@@ -246,6 +247,7 @@ jobs:
                   parsed = urlsplit(url)
                   host = (parsed.hostname or "").lower().rstrip(".")
                   if parsed.scheme != "https" or host not in allowed_hosts or parsed.username or parsed.password: raise SystemExit(f"Untrusted URL for {key}")
+                  if host == control_host and not parsed.path.startswith("/framework-input/"): raise SystemExit(f"Invalid private input route for {key}")
                   print(f"::add-mask::{url}")
               if file_id and not re.fullmatch(r"[A-Za-z0-9_-]{10,256}", file_id): raise SystemExit(f"Invalid Telegram file reference for {key}")
               if key in required and not url and not file_id: raise SystemExit(f"Missing required input: {key}")
@@ -317,8 +319,9 @@ jobs:
           import json, os, pathlib, subprocess, urllib.parse, urllib.request, zipfile
           config = json.load(open(os.environ["CONTRACT_PATH"], encoding="utf-8"))
           names = {"framework_url":"framework.jar","services_url":"services.jar","miui_services_url":"miui-services.jar","miui_framework_url":"miui-framework.jar"}
-          def stream_download(request, target, limit=1610612736):
-              with urllib.request.urlopen(request, timeout=120) as response, target.open("wb") as output:
+          MAX_JAR_BYTES = 100 * 1024 * 1024
+          def stream_download(request, target, limit=MAX_JAR_BYTES):
+              with urllib.request.urlopen(request, timeout=180) as response, target.open("wb") as output:
                   total = 0
                   while True:
                       chunk = response.read(1024 * 1024)
@@ -346,7 +349,8 @@ jobs:
               if file_id: telegram_download(file_id, target)
               elif "drive.google.com" in url or "docs.google.com" in url: subprocess.run(["python3","-m","gdown","--fuzzy",url,"-O",str(target)], check=True)
               else: stream_download(urllib.request.Request(url, headers={"User-Agent":"DeadZone-System/1.0"}), target)
-              if target.stat().st_size < 128 or not zipfile.is_zipfile(target): raise SystemExit(f"Invalid JAR: {filename}")
+              size = target.stat().st_size
+              if size < 128 or size > MAX_JAR_BYTES or not zipfile.is_zipfile(target): raise SystemExit(f"Invalid JAR: {filename}")
               active.append(key)
           if not active: raise SystemExit("No active JAR inputs")
           config["active_inputs"] = active
