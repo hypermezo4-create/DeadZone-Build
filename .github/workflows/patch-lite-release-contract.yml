@@ -33,18 +33,20 @@ jobs:
           if start < 0 or end < 0 or end <= start:
               raise SystemExit('Lite result-contract block markers not found')
 
-          replacement = '''      - name: Create result contract
-        working-directory: engine
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          python3 "$GITHUB_WORKSPACE/scripts/create_release_result.py" \\
-            --engine "$PWD" \\
-            --output "$GITHUB_WORKSPACE/deadzone-result.json" \\
-            --request-id "$REQUEST_ID" \\
-            --project lite
-
-'''
+          lines = [
+              '      - name: Create result contract',
+              '        working-directory: engine',
+              '        shell: bash',
+              '        run: |',
+              '          set -Eeuo pipefail',
+              '          python3 "$GITHUB_WORKSPACE/scripts/create_release_result.py" \\',
+              '            --engine "$PWD" \\',
+              '            --output "$GITHUB_WORKSPACE/deadzone-result.json" \\',
+              '            --request-id "$REQUEST_ID" \\',
+              '            --project lite',
+              '',
+          ]
+          replacement = '\n'.join(lines) + '\n'
           path.write_text(text[:start] + replacement + text[end:], encoding='utf-8')
           PY
 
