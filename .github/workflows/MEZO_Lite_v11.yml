@@ -1,4 +1,4 @@
-name: "🔥 DeadZone Lite v1.1"
+name: "Lite"
 
 run-name: "DeadZone Lite • ${{ inputs.request_id }}"
 
