@@ -128,14 +128,13 @@ jobs:
       - name: Validate private engine configuration
         shell: bash
         env:
-          GAMINGPLUS_ENGINE_REPOSITORY: ${{ secrets.GAMINGPLUS_ENGINE_REPOSITORY }}
           PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_TOKEN }}
           RCLONE_CONFIG_BASE64: ${{ secrets.RCLONE_CONFIG_BASE64 }}
           RCLONE_REMOTE_NAME: ${{ secrets.RCLONE_REMOTE_NAME }}
           RCLONE_UPLOAD_DIR: ${{ secrets.RCLONE_UPLOAD_DIR }}
         run: |
           set -Eeuo pipefail
-          for key in GAMINGPLUS_ENGINE_REPOSITORY PRIVATE_REPO_TOKEN RCLONE_CONFIG_BASE64 RCLONE_REMOTE_NAME RCLONE_UPLOAD_DIR; do
+          for key in PRIVATE_REPO_TOKEN RCLONE_CONFIG_BASE64 RCLONE_REMOTE_NAME RCLONE_UPLOAD_DIR; do
             [[ -n "${!key:-}" ]] || { echo "Missing required configuration: $key" >&2; exit 1; }
           done
 
@@ -168,7 +167,7 @@ jobs:
       - name: Checkout private GamingPlus engine
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          repository: ${{ secrets.GAMINGPLUS_ENGINE_REPOSITORY }}
+          repository: hypermezo4-create/DeadZone_GamingPlus
           token: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_TOKEN }}
           ref: main
           path: toolbuild
@@ -196,7 +195,7 @@ jobs:
           python3 -m venv .venv
           . .venv/bin/activate
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
-          bash setup.sh 2>&1 | tee -a build_action.log
+          bash bin/core/ci/setup.sh 2>&1 | tee -a build_action.log
 
       - name: Telemetry — build GamingPlus
         shell: bash
@@ -211,7 +210,8 @@ jobs:
           set -Eeuo pipefail
           input_url="$(printf '%s' "$ROM_URL_B64" | base64 --decode)"
           builder_name="$(printf '%s' "$BUILDER_NAME_B64" | base64 --decode)"
-          bash build.sh "$input_url" "DeadZone System" xst "$builder_name" "$BUILDER_ID" 2>&1 | tee -a build_action.log
+          export BUILDER_NAME="$builder_name"
+          bash build.sh "$input_url" 2>&1 | tee -a build_action.log
 
       - name: Telemetry — package GamingPlus
         shell: bash
@@ -238,8 +238,8 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          if [[ -s bin/ddevice/output_zip.txt ]]; then
-            output="$(cat bin/ddevice/output_zip.txt)"
+          if [[ -s bin/runtime/info/output_zip.txt ]]; then
+            output="$(cat bin/runtime/info/output_zip.txt)"
             if [[ -s "out/$output" ]]; then
               echo "DEADZONE_ARTIFACT_SIZE=$(stat -c '%s' "out/$output")" >> "$GITHUB_ENV"
             fi
@@ -285,16 +285,16 @@ jobs:
           from urllib.parse import urlsplit
 
           request_id = os.environ["REQUEST_ID"]
-          candidate = Path("bin/ddevice/deadzone_upload.json")
+          candidate = Path("bin/runtime/info/release_internal.json")
           if candidate.is_file():
               data = json.loads(candidate.read_text(encoding="utf-8"))
-              url = str(data.get("url") or data.get("drive_link") or data.get("result_url") or "")
+              url = str(data.get("drive_url") or data.get("url") or data.get("drive_link") or data.get("result_url") or "")
               file_name = str(data.get("file_name") or data.get("artifact_name") or "")
               sha256 = str(data.get("sha256") or "")
               size = int(data.get("size") or data.get("artifact_size") or 0)
           else:
-              output_name = Path("bin/ddevice/output_zip.txt")
-              link_file = Path("bin/ddevice/drive_link.txt")
+              output_name = Path("bin/runtime/info/output_zip.txt")
+              link_file = Path("bin/runtime/info/drive_link.txt")
               if not output_name.is_file() or not link_file.is_file():
                   raise SystemExit("GamingPlus did not expose delivery metadata")
               file_name = output_name.read_text(encoding="utf-8").strip()
@@ -372,4 +372,4 @@ jobs:
       - name: Remove temporary credentials
         if: always()
         shell: bash
-        run: rm -f -- toolbuild/rclone.conf
+        run: rm -f -- toolbuild/bin/runtime/config/rclone.conf
