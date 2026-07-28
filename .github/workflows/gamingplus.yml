@@ -29,6 +29,21 @@ jobs:
       DEADZONE_CONTROLLED_BUILD: "1"
 
     steps:
+      # maximize-build-space mounts the combined LVM on GITHUB_WORKSPACE. It must
+      # run before checkout so the launcher and private engine are written onto
+      # the large build volume instead of being hidden below a later mount.
+      - name: Prepare hosted runner disk
+        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
+        with:
+          swap-size-mb: 1024
+          root-reserve-mb: 2048
+          temp-reserve-mb: 256
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
       - name: Checkout DeadZone launcher
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -124,21 +139,25 @@ jobs:
             [[ -n "${!key:-}" ]] || { echo "Missing required configuration: $key" >&2; exit 1; }
           done
 
-      - name: Prepare hosted runner disk
-        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
-        with:
-          swap-size-mb: 1024
-          root-reserve-mb: 768
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-
-      - name: Gate available disk
+      - name: Gate available build disk
         shell: bash
         run: |
           set -Eeuo pipefail
-          available="$(df -Pk / | awk 'NR == 2 {print $4 * 1024}')"
-          (( available >= 25 * 1024 * 1024 * 1024 )) || { echo "At least 25 GiB free is required" >&2; exit 1; }
+          build_path="${GITHUB_WORKSPACE:?}"
+          required_kib=$((25 * 1024 * 1024))
+          available_kib="$(df -Pk "$build_path" | awk 'NR == 2 {print $4}')"
+          [[ "$available_kib" =~ ^[0-9]+$ ]] || {
+            echo "Unable to read available build-volume space" >&2
+            df -h "$build_path" / /mnt || true
+            exit 1
+          }
+          printf 'Build volume: %s\n' "$build_path"
+          df -h "$build_path" / /mnt || true
+          if (( available_kib < required_kib )); then
+            available_gib="$(awk -v kib="$available_kib" 'BEGIN { printf "%.2f", kib / 1024 / 1024 }')"
+            echo "At least 25 GiB free is required on the build volume; ${available_gib} GiB is available" >&2
+            exit 1
+          fi
 
       - name: Telemetry — load GamingPlus engine
         shell: bash
@@ -352,6 +371,5 @@ jobs:
 
       - name: Remove temporary credentials
         if: always()
-        working-directory: toolbuild
         shell: bash
-        run: rm -f -- rclone.conf
+        run: rm -f -- toolbuild/rclone.conf
