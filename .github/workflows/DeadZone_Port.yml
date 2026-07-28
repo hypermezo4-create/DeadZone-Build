@@ -56,6 +56,18 @@ jobs:
       DEADZONE_PROJECT: port
 
     steps:
+      # The build-space action mounts the combined LVM on GITHUB_WORKSPACE.
+      # It must run before checkout so it cannot hide/delete launcher files.
+      - name: Maximize hosted runner space
+        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
+        with:
+          swap-size-mb: 1024
+          root-reserve-mb: 512
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-docker-images: "true"
+
       - name: Checkout DeadZone launcher
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -225,16 +237,6 @@ jobs:
             echo "token_source=$token_source"
           } >> "$GITHUB_OUTPUT"
           echo "Private Port engine access verified"
-
-      - name: Maximize hosted runner space
-        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
-        with:
-          swap-size-mb: 1024
-          root-reserve-mb: 512
-          remove-dotnet: "true"
-          remove-android: "true"
-          remove-haskell: "true"
-          remove-docker-images: "true"
 
       - name: Live — load Port engine
         if: steps.mode.outputs.mode == 'bot'
