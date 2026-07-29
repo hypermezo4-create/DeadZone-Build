@@ -1,6 +1,6 @@
 name: "🎮 DeadZone GamingPlus"
 
-run-name: "DeadZone GamingPlus • ${{ inputs.request_id }}"
+run-name: "DeadZone GamingPlus  ${{ inputs.request_id }}"
 
 on:
   workflow_dispatch:
