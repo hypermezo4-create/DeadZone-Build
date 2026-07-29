@@ -29,20 +29,24 @@ jobs:
       DEADZONE_CONTROLLED_BUILD: "1"
 
     steps:
-      # maximize-build-space mounts the combined LVM on GITHUB_WORKSPACE. It must
-      # run before checkout so the launcher and private engine are written onto
-      # the large build volume instead of being hidden below a later mount.
+      # Keep the runner layout simple like Lite: reclaim the large preinstalled
+      # toolchains, but do not build a second LVM from / and /mnt when both live
+      # on the same hosted-runner filesystem.
       - name: Prepare hosted runner disk
-        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
-        with:
-          swap-size-mb: 1024
-          root-reserve-mb: 2048
-          temp-reserve-mb: 256
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "Disk before cleanup:"
+          df -h / "$GITHUB_WORKSPACE" /mnt || true
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          echo "Disk after cleanup:"
+          df -h / "$GITHUB_WORKSPACE" /mnt || true
 
       - name: Checkout DeadZone launcher
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -143,18 +147,25 @@ jobs:
         run: |
           set -Eeuo pipefail
           build_path="${GITHUB_WORKSPACE:?}"
-          required_kib=$((25 * 1024 * 1024))
-          available_kib="$(df -Pk "$build_path" | awk 'NR == 2 {print $4}')"
-          [[ "$available_kib" =~ ^[0-9]+$ ]] || {
-            echo "Unable to read available build-volume space" >&2
+          required_build_kib=$((25 * 1024 * 1024))
+          required_root_kib=$((8 * 1024 * 1024))
+          available_build_kib="$(df -Pk "$build_path" | awk 'NR == 2 {print $4}')"
+          available_root_kib="$(df -Pk / | awk 'NR == 2 {print $4}')"
+          [[ "$available_build_kib" =~ ^[0-9]+$ && "$available_root_kib" =~ ^[0-9]+$ ]] || {
+            echo "Unable to read runner disk space" >&2
             df -h "$build_path" / /mnt || true
             exit 1
           }
           printf 'Build volume: %s\n' "$build_path"
           df -h "$build_path" / /mnt || true
-          if (( available_kib < required_kib )); then
-            available_gib="$(awk -v kib="$available_kib" 'BEGIN { printf "%.2f", kib / 1024 / 1024 }')"
+          if (( available_build_kib < required_build_kib )); then
+            available_gib="$(awk -v kib="$available_build_kib" 'BEGIN { printf "%.2f", kib / 1024 / 1024 }')"
             echo "At least 25 GiB free is required on the build volume; ${available_gib} GiB is available" >&2
+            exit 1
+          fi
+          if (( available_root_kib < required_root_kib )); then
+            available_gib="$(awk -v kib="$available_root_kib" 'BEGIN { printf "%.2f", kib / 1024 / 1024 }')"
+            echo "At least 8 GiB free is required on the runner root for tool installation; ${available_gib} GiB is available" >&2
             exit 1
           fi
 
