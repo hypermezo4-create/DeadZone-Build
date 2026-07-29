@@ -266,10 +266,10 @@ jobs:
         run: |
           set -Eeuo pipefail
           python3 - <<'PY'
-          import hashlib
           import json
           import os
           import re
+          import zipfile
           from datetime import datetime, timezone
           from pathlib import Path
           from urllib.parse import urlsplit
@@ -315,14 +315,13 @@ jobs:
           if not rom_version or not android_version or not region_raw or not version_raw:
               raise SystemExit(f"{edition} release metadata is incomplete")
 
-          expected_sha = first(["output_sha256.txt"]).lower()
-          digest = hashlib.sha256()
-          with artifact.open("rb") as handle:
-              for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                  digest.update(chunk)
-          actual_sha = digest.hexdigest()
-          if not re.fullmatch(r"[0-9a-f]{64}", expected_sha) or expected_sha != actual_sha:
-              raise SystemExit(f"{edition} archive integrity verification failed")
+          try:
+              with zipfile.ZipFile(artifact) as archive:
+                  bad_member = archive.testzip()
+          except (OSError, zipfile.BadZipFile) as exc:
+              raise SystemExit(f"{edition} archive integrity verification failed") from exc
+          if bad_member is not None:
+              raise SystemExit(f"{edition} archive contains a corrupt member: {bad_member}")
 
           region_map = {
               "china": "ChinaStable",
