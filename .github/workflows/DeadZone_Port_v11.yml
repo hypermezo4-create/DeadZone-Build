@@ -1,0 +1,63 @@
+name: "Port"
+
+run-name: "DeadZone Port  ${{ inputs.request_id }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: "Bot request ID"
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      request_id:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/DeadZone_Port.yml
+    with:
+      request_id: ${{ inputs.request_id }}
+    secrets: inherit
+
+  release-contract:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout launcher contract tools
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download legacy Port result
+        uses: actions/download-artifact@v4
+        with:
+          name: deadzone-result-${{ inputs.request_id }}
+          path: legacy-result
+
+      - name: Upgrade Port result to release contract v1.1
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/upgrade_result_v11.py \
+            --input legacy-result/deadzone-result.json \
+            --output deadzone-result.json \
+            --request-id "${{ inputs.request_id }}" \
+            --project port
+
+      - name: Expose release contract v1.1
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: deadzone-result-${{ inputs.request_id }}
+          path: deadzone-result.json
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 1
