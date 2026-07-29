@@ -65,6 +65,16 @@ jobs:
       RCLONE_PUBLIC_LINK_BASE: ${{ secrets.RCLONE_PUBLIC_LINK_BASE }}
 
     steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
+        with:
+          swap-size-mb: 1024
+          root-reserve-mb: 512
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-docker-images: "true"
+
       - name: Checkout launcher
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -166,16 +176,6 @@ jobs:
           for key in RCLONE_CONFIG_BASE64 RCLONE_REMOTE_NAME RCLONE_UPLOAD_DIR; do
             [[ -n "${!key:-}" ]] || { echo "Missing $key" >&2; exit 1; }
           done
-
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
-        with:
-          swap-size-mb: 1024
-          root-reserve-mb: 512
-          remove-dotnet: "true"
-          remove-android: "true"
-          remove-haskell: "true"
-          remove-docker-images: "true"
 
       - name: Live — load Lite engine
         if: steps.mode.outputs.mode == 'bot'
