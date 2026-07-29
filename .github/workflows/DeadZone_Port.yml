@@ -1,6 +1,6 @@
 name: "🛠️ DeadZone Port"
 
-run-name: "DeadZone Port • ${{ inputs.request_id || github.actor }}"
+run-name: "DeadZone Port  ${{ inputs.request_id || github.actor }}"
 
 on:
   workflow_dispatch:
