@@ -1,6 +1,6 @@
 name: "Lite"
 
-run-name: "DeadZone Lite • ${{ inputs.request_id }}"
+run-name: "DeadZone Lite  ${{ inputs.request_id }}"
 
 on:
   workflow_dispatch:
